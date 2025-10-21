@@ -34,31 +34,45 @@ class TemporalFeatureExtractor:
         event_col: str,
         timestamp_col: str = 'timestamp'
     ) -> pd.DataFrame:
-        """Compute rolling window aggregations."""
+        """
+        Compute rolling window aggregations.
+
+        Uses time-based filtering instead of pandas rolling windows
+        to support both numeric and categorical (string) data.
+        """
         df = df.sort_values(timestamp_col)
         features = []
 
         for window_days in self.windows_days:
-            window_str = f"{window_days}D"
-
-            # Set timestamp as index for rolling operations
-            df_indexed = df.set_index(timestamp_col)
+            window_timedelta = timedelta(days=window_days)
 
             # Group by entity and compute rolling stats
             for entity_id in df[entity_col].unique():
-                entity_df = df_indexed[df_indexed[entity_col] == entity_id]
+                entity_df = df[df[entity_col] == entity_id].copy()
 
-                # Rolling count
-                rolling_count = entity_df.rolling(window_str)[event_col].count()
+                if len(entity_df) == 0:
+                    features.append({
+                        'entity_id': entity_id,
+                        f'count_{window_days}d': 0,
+                        f'unique_events_{window_days}d': 0,
+                    })
+                    continue
 
-                # Rolling unique events (apply nunique on rolling window)
-                rolling_unique = entity_df.rolling(window_str)[event_col].apply(lambda x: x.nunique(), raw=False)
+                # Get the last timestamp for this entity
+                max_timestamp = entity_df[timestamp_col].max()
+                window_start = max_timestamp - window_timedelta
 
-                # Store features
+                # Filter to events within the window (last N days)
+                window_df = entity_df[entity_df[timestamp_col] >= window_start]
+
+                # Compute aggregations (works with both numeric and string columns)
+                rolling_count = len(window_df)
+                rolling_unique = window_df[event_col].nunique()
+
                 features.append({
                     'entity_id': entity_id,
-                    f'count_{window_days}d': rolling_count.iloc[-1] if len(rolling_count) > 0 else 0,
-                    f'unique_events_{window_days}d': rolling_unique.iloc[-1] if len(rolling_unique) > 0 else 0,
+                    f'count_{window_days}d': rolling_count,
+                    f'unique_events_{window_days}d': rolling_unique,
                 })
 
         return pd.DataFrame(features)
