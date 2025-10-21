@@ -62,10 +62,43 @@ done
 echo " ✓"
 
 # Wait for data initialization to complete
-echo -n "Waiting for data initialization (this takes a few minutes)..."
-until docker-compose logs data-init 2>/dev/null | grep -q "Data Initialization Complete" || \
-      docker-compose ps data-init | grep -q "Exit 0"; do
-    echo -n "."
+echo "Waiting for data initialization (this takes a few minutes)..."
+last_step=0
+last_status=""
+while true; do
+    logs=$(docker-compose logs --no-color data-init 2>/dev/null | tail -n 50)
+
+    if echo "$logs" | grep -qi "Data initialization complete"; then
+        echo "  100% - Data initialization complete"
+        break
+    fi
+
+    step=$(echo "$logs" | grep -o '\\[[0-9]/5\\]' | tail -n1 | tr -d '[]' | cut -d'/' -f1)
+    if [[ -n "$step" && "$step" -gt "$last_step" ]]; then
+        last_step=$step
+        percent=$(( step * 20 ))
+        status_line=$(echo "$logs" | grep "\\[$step/5\\]" | tail -n1)
+        status=${status_line#*] }
+        printf "  %3d%% - Step %d/5: %s\n" "$percent" "$step" "$status"
+    fi
+
+    latest=$(echo "$logs" | tail -n1)
+    if [[ -n "$latest" && "$latest" != "$last_status" ]]; then
+        latest_clean=${latest#*| }
+        echo "      ↳ ${latest_clean}"
+        last_status="$latest"
+    fi
+
+    if docker-compose ps data-init 2>/dev/null | grep -q "Exit 0"; then
+        echo "  Data initialization container exited successfully."
+        break
+    fi
+
+    if docker-compose ps data-init 2>/dev/null | grep -Eq "Exit [1-9]"; then
+        echo "  ⚠️  data-init container exited with a non-zero status. Check logs with 'docker-compose logs data-init'."
+        break
+    fi
+
     sleep 5
 done
 echo " ✓"
