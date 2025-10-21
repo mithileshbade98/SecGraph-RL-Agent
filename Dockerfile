@@ -45,17 +45,22 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Create necessary directories
+# Create necessary directories with proper ownership
 RUN mkdir -p \
     data/synthetic \
     data/audits \
     artifacts/faiss \
     artifacts/models \
     artifacts/runs \
+    logs && \
+    chown -R appuser:appuser \
+    data \
+    artifacts \
     logs
 
-# Make CLI scripts executable
-RUN chmod +x reason_agent/cli/*.py
+# Make CLI scripts and shell scripts executable
+RUN chmod +x reason_agent/cli/*.py && \
+    chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 
 USER appuser
 
