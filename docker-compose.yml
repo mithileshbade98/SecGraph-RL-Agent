@@ -1,0 +1,163 @@
+version: '3.8'
+
+services:
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5.14-community
+    container_name: secgraph-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/secgraph123
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2g
+      - NEO4J_dbms_memory_pagecache_size=1g
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    networks:
+      - secgraph-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # Data Initializer - Generates synthetic data and loads into Neo4j
+  data-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secgraph-data-init
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=secgraph123
+      - NEO4J_DATABASE=neo4j
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - shared_data:/app/data
+      - shared_artifacts:/app/artifacts
+    networks:
+      - secgraph-network
+    command: python scripts/init-data.py
+    restart: "no"
+
+  # Main API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secgraph-api
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=secgraph123
+      - NEO4J_DATABASE=neo4j
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - EMBEDDING_DEVICE=cpu
+      - AGENT_TOPOLOGY=single
+      - LLM_PROVIDER=ollama
+      - RANDOM_SEED=42
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    volumes:
+      - shared_data:/app/data:ro
+      - shared_artifacts:/app/artifacts
+      - ./configs:/app/configs:ro
+    networks:
+      - secgraph-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: >
+      sh -c "
+        echo 'Waiting for data initialization...' &&
+        while [ ! -f /app/data/.init_complete ]; do sleep 2; done &&
+        echo 'Starting API service...' &&
+        python -m uvicorn reason_agent.serving.api:app --host 0.0.0.0 --port 8000
+      "
+
+  # Streamlit UI
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secgraph-ui
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=secgraph123
+      - NEO4J_DATABASE=neo4j
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - EMBEDDING_DEVICE=cpu
+      - AGENT_TOPOLOGY=single
+      - RANDOM_SEED=42
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    volumes:
+      - shared_data:/app/data
+      - shared_artifacts:/app/artifacts
+      - ./configs:/app/configs:ro
+    networks:
+      - secgraph-network
+    command: >
+      sh -c "
+        echo 'Waiting for data initialization...' &&
+        while [ ! -f /app/data/.init_complete ]; do sleep 2; done &&
+        echo 'Starting Streamlit UI...' &&
+        streamlit run reason_agent/ui/app.py --server.port=8501 --server.address=0.0.0.0
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_import:
+    driver: local
+  neo4j_plugins:
+    driver: local
+  shared_data:
+    driver: local
+  shared_artifacts:
+    driver: local
+
+networks:
+  secgraph-network:
+    driver: bridge

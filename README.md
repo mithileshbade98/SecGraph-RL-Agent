@@ -23,6 +23,43 @@ SecGraph-RL Agent detects complex security anomalies (multi-account abuse, free-
 
 ---
 
+## 🚀 Docker Quick Start (One Command!)
+
+**The fastest way to get started:**
+
+```bash
+./start.sh
+```
+
+**That's it!** This single command:
+- ✅ Builds Docker images
+- ✅ Starts Neo4j database with pre-seeded data
+- ✅ Generates 2000+ synthetic security events (50+ anomaly types)
+- ✅ Loads temporal graph into Neo4j
+- ✅ Builds FAISS vector index
+- ✅ Starts API service at http://localhost:8000
+- ✅ Starts Streamlit UI at http://localhost:8501
+
+**First run takes 5-10 minutes.** Subsequent runs are instant.
+
+**Prerequisites**: Docker Desktop (4GB RAM recommended)
+
+👉 **See [DOCKER.md](DOCKER.md) for complete Docker documentation**
+
+### Alternative: Local Development
+
+For native installation (without Docker):
+
+```bash
+make setup      # Install Poetry dependencies
+make neo4j-up   # Start Neo4j
+make ingest     # Generate and load data
+make index      # Build FAISS index
+make ui         # Launch UI
+```
+
+---
+
 ## 🏗️ Architecture
 
 ```
