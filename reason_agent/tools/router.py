@@ -1,15 +1,37 @@
-"""
-Tool router using semantic search.
+"""Tool router with optional semantic search.
 
-Routes queries to appropriate tools using vector similarity + optional rule-based fallback.
+The Streamlit UI uses the router in ``rule`` mode so it can operate without the
+heavy ML dependencies needed for semantic search.  Previously the module
+unconditionally imported the embedding stack which caused the UI container to
+crash if packages such as ``sentence_transformers`` or FAISS were missing.  We
+now treat those imports as optional so that rule-based routing still works in
+lightweight environments.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from __future__ import annotations
+
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 import re
 from loguru import logger
 from reason_agent.tools.registry import ToolRegistry, Tool
-from reason_agent.embeddings.text_embedder import TextEmbedder
-from reason_agent.embeddings.faiss_index import FAISSIndex
+
+try:  # pragma: no cover - optional dependency varies per environment
+    from reason_agent.embeddings.text_embedder import TextEmbedder  # type: ignore
+    _EMBEDDINGS_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - handled lazily when used
+    TextEmbedder = None  # type: ignore[assignment]
+    _EMBEDDINGS_IMPORT_ERROR = exc
+
+try:  # pragma: no cover - optional dependency varies per environment
+    from reason_agent.embeddings.faiss_index import FAISSIndex  # type: ignore
+    _FAISS_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - handled lazily when used
+    FAISSIndex = None  # type: ignore[assignment]
+    _FAISS_IMPORT_ERROR = exc
+
+if TYPE_CHECKING:  # pragma: no cover - for static type checking only
+    from reason_agent.embeddings.text_embedder import TextEmbedder as _TextEmbedder
+    from reason_agent.embeddings.faiss_index import FAISSIndex as _FAISSIndex
 
 
 class ToolRouter:
@@ -18,8 +40,8 @@ class ToolRouter:
     def __init__(
         self,
         registry: ToolRegistry,
-        embedder: Optional[TextEmbedder] = None,
-        index: Optional[FAISSIndex] = None,
+        embedder: Optional["TextEmbedder"] = None,
+        index: Optional["FAISSIndex"] = None,
         method: str = "semantic",
         confidence_threshold: float = 0.75,
         fallback_to_rules: bool = True,
@@ -41,6 +63,32 @@ class ToolRouter:
         self.method = method
         self.confidence_threshold = confidence_threshold
         self.fallback_to_rules = fallback_to_rules
+
+        if method in {"semantic", "hybrid"}:
+            missing_components = []
+            if self.embedder is None:
+                if _EMBEDDINGS_IMPORT_ERROR is not None:
+                    missing_components.append(
+                        f"embeddings backend ({_EMBEDDINGS_IMPORT_ERROR})"
+                    )
+                else:
+                    missing_components.append("TextEmbedder instance")
+            if self.index is None:
+                if _FAISS_IMPORT_ERROR is not None:
+                    missing_components.append(
+                        f"FAISS index ({_FAISS_IMPORT_ERROR})"
+                    )
+                else:
+                    missing_components.append("FAISS index instance")
+
+            if missing_components:
+                components_str = ", ".join(missing_components)
+                logger.warning(
+                    "Semantic routing unavailable because %s. Falling back to rule-based routing.",
+                    components_str,
+                )
+                if method == "semantic":
+                    self.method = "rule"
 
         # Rule patterns (loaded from config or defaults)
         self.rules = [
