@@ -45,6 +45,7 @@ services:
       - NEO4J_DATABASE=neo4j
       - LIGHTWEIGHT_MODE=true  # Enable for M1 Mac with 8GB RAM
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
     volumes:
       - shared_data:/app/data
       - shared_artifacts:/app/artifacts
@@ -78,6 +79,7 @@ services:
       - RANDOM_SEED=42
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
     volumes:
       - shared_data:/app/data:ro
       - shared_artifacts:/app/artifacts
@@ -124,6 +126,7 @@ services:
       - RANDOM_SEED=42
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
     volumes:
       - shared_data:/app/data
       - shared_artifacts:/app/artifacts
