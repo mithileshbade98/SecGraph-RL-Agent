@@ -1,0 +1,123 @@
+# PPO (Proximal Policy Optimization) configuration for SecGraph-RL Agent
+# Why PPO: Stable policy gradient method with verifiable rewards for reasoning tasks
+# Source: "RL with Verifiable Rewards" (2025) - https://arxiv.org/abs/2410.15246
+
+# Model configuration
+model:
+  base_model: null  # Will use planner LLM
+  adapter_path: artifacts/models/ppo_adapter
+  peft_config:
+    method: lora
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.1
+    target_modules: ["q_proj", "v_proj"]
+    bias: none
+    task_type: CAUSAL_LM
+
+# Training hyperparameters
+training:
+  learning_rate: 1.0e-5
+  batch_size: 4
+  mini_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  num_train_epochs: 3
+  warmup_steps: 100
+
+  # PPO specific
+  ppo_epochs: 4
+  clip_range: 0.2
+  clip_range_vf: null  # None = same as clip_range
+  vf_coef: 0.5         # Value function coefficient
+  ent_coef: 0.01       # Entropy coefficient for exploration
+  target_kl: 0.1       # Early stopping if KL divergence exceeds
+
+  # Optimization
+  optimizer: adamw
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+
+  # Scheduler
+  lr_scheduler_type: cosine
+  num_warmup_steps: 100
+
+# Reward configuration (verifiable rewards)
+rewards:
+  # Process rewards (step-level)
+  process:
+    weight: 0.3
+    tool_success: 1.0
+    tool_failure: -0.5
+    evidence_match: 0.5
+    logical_consistency: 0.3
+
+  # Final rewards (outcome-level)
+  final:
+    weight: 0.7
+    task_success: 2.0
+    partial_success: 0.5
+    task_failure: -1.0
+    correct_verification: 1.0
+
+  # Penalties
+  penalties:
+    long_trace: -0.1          # Per extra step beyond baseline
+    redundant_tool: -0.05     # Per redundant tool call
+    high_latency: -0.2        # If exceeds timeout
+    policy_violation: -2.0    # Critical penalty
+
+  # Bonuses
+  bonuses:
+    early_success: 0.2
+    efficient_path: 0.3
+    high_confidence: 0.1
+
+# Environment configuration (math verifier tasks)
+environment:
+  task_type: math_verification  # math_verification | policy_checking | unit_test
+  num_tasks: 1000
+  max_steps_per_episode: 10
+  timeout_seconds: 60
+
+  # Math task difficulty distribution
+  difficulty:
+    easy: 0.3
+    medium: 0.5
+    hard: 0.2
+
+  # Verification
+  enable_verification: true
+  verifier_type: programmatic  # programmatic | model
+
+# Replay buffer
+replay:
+  buffer_size: 10000
+  enable_prioritization: false
+  alpha: 0.6  # Prioritization exponent
+  beta: 0.4   # Importance sampling weight
+
+# Evaluation
+evaluation:
+  eval_steps: 100
+  eval_batch_size: 8
+  save_best_model: true
+  metric: mean_reward
+
+# Logging & checkpointing
+logging:
+  log_interval: 10
+  save_steps: 500
+  save_total_limit: 3
+  logging_dir: artifacts/runs/ppo
+  report_to: []  # tensorboard | wandb
+
+# Advanced
+advanced:
+  use_score_scaling: true
+  use_score_norm: false
+  whiten_rewards: true
+  enable_gradient_checkpointing: false
+  fp16: false  # Mixed precision (use on GPU)

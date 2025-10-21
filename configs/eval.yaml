@@ -1,0 +1,211 @@
+# Evaluation configuration for SecGraph-RL Agent
+
+# Test scenarios (50 anomaly families)
+scenarios:
+  # Multi-account abuse patterns
+  - name: multi_email_free_tier_churn
+    description: "User cycles multiple emails to farm free tier resources"
+    synthetic_params:
+      num_accounts: 5
+      shared_device: true
+      shared_ip: false
+      temporal_burst: true
+      time_window_hours: 48
+    expected_outcome:
+      detected: true
+      cluster_identified: true
+      emails_listed: true
+      policy_violation: true
+
+  - name: shared_device_fan_out
+    description: "Multiple accounts from same device for abuse"
+    synthetic_params:
+      num_accounts: 10
+      shared_device: true
+      shared_ip: true
+      device_fingerprint_stable: true
+
+  - name: ip_rotation_abuse
+    description: "Account using rotating IPs to evade rate limits"
+    synthetic_params:
+      num_ips: 20
+      rotation_pattern: sequential
+      time_between_rotations_minutes: 30
+
+  - name: velocity_violation
+    description: "Account exceeds login velocity limits"
+    synthetic_params:
+      num_logins: 100
+      time_window_hours: 1
+      geo_locations: 5
+
+  - name: impossible_travel
+    description: "Account logins from geographically impossible locations"
+    synthetic_params:
+      locations: ["New York", "Tokyo", "London"]
+      time_between_minutes: [30, 45]
+
+  - name: signup_storm
+    description: "Burst of account signups from same IP/device"
+    synthetic_params:
+      num_accounts: 50
+      time_window_minutes: 10
+      shared_ip: true
+
+  - name: card_testing
+    description: "Rapid card validation attempts"
+    synthetic_params:
+      num_attempts: 200
+      time_window_minutes: 5
+      success_rate: 0.05
+
+  - name: resource_scraping
+    description: "Automated resource enumeration and extraction"
+    synthetic_params:
+      num_requests: 1000
+      time_window_minutes: 30
+      user_agent_pattern: bot
+
+  - name: account_takeover
+    description: "Sudden change in account behavior patterns"
+    synthetic_params:
+      normal_behavior_days: 30
+      anomalous_behavior_hours: 2
+      ip_change: true
+      device_change: true
+
+  - name: free_tier_hopping
+    description: "Creating accounts to exploit free tier limits"
+    synthetic_params:
+      num_accounts: 20
+      resource_usage_percent: 99
+      abandon_after_days: 1
+
+# Additional anomaly families (40 more)
+  - name: credential_stuffing
+  - name: brute_force_login
+  - name: session_hijacking
+  - name: privilege_escalation
+  - name: data_exfiltration
+  - name: api_abuse
+  - name: rate_limit_evasion
+  - name: referral_fraud
+  - name: promo_code_abuse
+  - name: fake_account_creation
+  - name: bot_network
+  - name: sybil_attack
+  - name: shared_payment_method
+  - name: chargeback_fraud
+  - name: subscription_abuse
+  - name: trial_farming
+  - name: coupon_stacking
+  - name: inventory_hoarding
+  - name: price_manipulation
+  - name: auction_sniping
+  - name: review_bombing
+  - name: vote_manipulation
+  - name: spam_generation
+  - name: phishing_campaign
+  - name: malware_distribution
+  - name: ddos_coordination
+  - name: click_fraud
+  - name: ad_fraud
+  - name: affiliate_fraud
+  - name: identity_theft
+  - name: synthetic_identity
+  - name: account_aggregation
+  - name: credential_sharing
+  - name: geo_fencing_bypass
+  - name: time_zone_abuse
+  - name: currency_arbitrage
+  - name: cross_border_fraud
+  - name: smurfing
+  - name: layering
+  - name: integration_fraud
+
+# Evaluation metrics
+metrics:
+  # Detection metrics
+  - name: success@1
+    description: "Percentage of scenarios correctly detected"
+    weight: 0.3
+
+  - name: precision
+    description: "True positives / (True positives + False positives)"
+    weight: 0.2
+
+  - name: recall
+    description: "True positives / (True positives + False negatives)"
+    weight: 0.2
+
+  - name: f1_score
+    description: "Harmonic mean of precision and recall"
+    weight: 0.3
+
+  # Efficiency metrics
+  - name: mean_plan_length
+    description: "Average number of reasoning steps"
+    target: "<= 8"
+
+  - name: tool_efficiency
+    description: "Useful tool calls / Total tool calls"
+    target: ">= 0.8"
+
+  - name: mean_latency_seconds
+    description: "Average time to complete detection"
+    target: "<= 30"
+
+  # Quality metrics
+  - name: explanation_quality
+    description: "Human-evaluated explanation score (1-5)"
+    target: ">= 4.0"
+
+  - name: verifiable_reward
+    description: "Average verifiable reward score"
+    target: ">= 0.7"
+
+  - name: policy_compliance
+    description: "Percentage passing policy verification"
+    target: ">= 0.95"
+
+# Test execution
+execution:
+  num_runs_per_scenario: 3
+  random_seed: 42
+  timeout_per_scenario_seconds: 120
+  parallel_execution: false
+  save_traces: true
+  trace_output_dir: artifacts/runs/evaluation
+
+# Comparison baselines
+baselines:
+  - name: rule_based
+    description: "Simple rule-based detector"
+    enabled: true
+
+  - name: random
+    description: "Random classification"
+    enabled: true
+
+  - name: gnn_only
+    description: "GNN without reasoning agent"
+    enabled: false
+
+# Statistical testing
+statistical_tests:
+  significance_level: 0.05
+  bootstrap_samples: 1000
+  confidence_interval: 0.95
+
+# Reporting
+reporting:
+  output_dir: artifacts/runs/evaluation
+  formats:
+    - json
+    - html
+    - markdown
+  include_traces: true
+  include_visualizations: true
+  generate_confusion_matrix: true
+  generate_pr_curve: true
+  generate_roc_curve: true

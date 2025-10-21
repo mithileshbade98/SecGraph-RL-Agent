@@ -1,0 +1,98 @@
+# Graph configuration for SecGraph-RL Agent
+
+# Node types in the identity graph
+node_types:
+  - Person
+  - Email
+  - Account
+  - Device
+  - IP
+  - Session
+  - Card
+  - Resource
+  - Tenant
+
+# Edge types (relationships)
+edge_types:
+  - type: USES
+    from: [Person, Account]
+    to: [Email, Device, IP, Card]
+    temporal: true
+  - type: LOGS_IN_FROM
+    from: [Account]
+    to: [IP, Device]
+    temporal: true
+  - type: SAME_DEVICE_AS
+    from: [Account]
+    to: [Account]
+    temporal: true
+  - type: SHARES_IP_WITH
+    from: [Account]
+    to: [Account]
+    temporal: true
+  - type: CREATES
+    from: [Account]
+    to: [Resource, Session]
+    temporal: true
+  - type: CHARGES_TO
+    from: [Account]
+    to: [Card]
+    temporal: true
+  - type: ACCESSES
+    from: [Account, Session]
+    to: [Resource]
+    temporal: true
+  - type: BELONGS_TO
+    from: [Account, Resource]
+    to: [Tenant]
+    temporal: false
+
+# Bitemporal attributes
+temporal_attributes:
+  valid_from: datetime  # When the fact became true in reality
+  valid_to: datetime    # When the fact ceased to be true (null = still valid)
+  observed_at: datetime # When we learned about the fact
+
+# Graph construction
+construction:
+  batch_size: 1000
+  enable_deduplication: true
+  enable_entity_resolution: true
+  entity_resolution_threshold: 0.85
+
+# Graph traversal limits
+traversal:
+  max_depth: 4
+  max_neighbors: 100
+  timeout_seconds: 30
+
+# Snapshot queries (as-of time)
+snapshots:
+  enable_as_of_queries: true
+  default_as_of: now
+  cache_snapshots: true
+  cache_ttl_minutes: 60
+
+# Graph ML features
+graph_ml:
+  node_embedding_dim: 128
+  edge_embedding_dim: 64
+  aggregation: mean  # mean | sum | max | attention
+  num_layers: 2
+  dropout: 0.1
+  activation: relu
+
+# GraphSAGE configuration
+graphsage:
+  hidden_channels: 128
+  num_layers: 2
+  num_neighbors: [10, 5]  # Sampling neighbors per layer
+  aggregator: mean  # mean | pool | lstm
+
+# Temporal GNN (TGAT/TGN interface)
+temporal_gnn:
+  enable: false  # Enable when temporal patterns are critical
+  time_encoding: harmonic  # harmonic | learned
+  time_dim: 16
+  memory_dim: 128
+  use_memory: false

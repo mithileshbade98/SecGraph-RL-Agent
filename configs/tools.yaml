@@ -1,0 +1,238 @@
+# Tool registry for SecGraph-RL Agent
+
+tools:
+  - name: policy_checker
+    description: "Check if a graph pattern violates security policies (e.g., shared device abuse, velocity rules)"
+    category: verification
+    parameters:
+      - name: pattern
+        type: string
+        description: "Policy pattern to check (e.g., 'multi_account_same_device', 'ip_velocity')"
+        required: true
+      - name: as_of
+        type: datetime
+        description: "Temporal snapshot time for evaluation"
+        required: false
+      - name: threshold
+        type: float
+        description: "Threshold for anomaly detection"
+        required: false
+        default: 0.8
+    executor: policy_verifier
+    examples:
+      - "Check if accounts share devices beyond threshold"
+      - "Verify IP velocity rules for suspicious logins"
+
+  - name: timeline_diff
+    description: "Compare entity timelines between two time windows to detect changes"
+    category: analysis
+    parameters:
+      - name: entity_id
+        type: string
+        required: true
+      - name: window1_start
+        type: datetime
+        required: true
+      - name: window1_end
+        type: datetime
+        required: true
+      - name: window2_start
+        type: datetime
+        required: true
+      - name: window2_end
+        type: datetime
+        required: true
+    executor: temporal_analyzer
+    examples:
+      - "Compare user behavior between last week and this week"
+      - "Detect changes in account activity patterns"
+
+  - name: entity_linker
+    description: "Link related entities across the graph (email -> accounts -> devices -> IPs)"
+    category: graph
+    parameters:
+      - name: entity_id
+        type: string
+        required: true
+      - name: max_depth
+        type: integer
+        default: 3
+      - name: relationship_types
+        type: list
+        required: false
+    executor: graph_traverser
+    examples:
+      - "Find all devices linked to an email address"
+      - "Discover shared resources across accounts"
+
+  - name: kusto_query
+    description: "Execute KQL query on Azure Data Explorer for time-series anomaly detection"
+    category: query
+    parameters:
+      - name: query
+        type: string
+        required: true
+      - name: database
+        type: string
+        default: SecurityGraph
+      - name: timeout_seconds
+        type: integer
+        default: 30
+    executor: kusto_executor
+    examples:
+      - "Run anomaly detection on login events"
+      - "Query billing patterns with KQL"
+    production_only: true
+
+  - name: cluster_detector
+    description: "Detect clusters of related accounts using graph algorithms"
+    category: analysis
+    parameters:
+      - name: algorithm
+        type: string
+        enum: [louvain, connected_components, label_propagation]
+        default: louvain
+      - name: min_cluster_size
+        type: integer
+        default: 3
+      - name: similarity_threshold
+        type: float
+        default: 0.7
+    executor: cluster_analyzer
+    examples:
+      - "Find groups of accounts with shared devices"
+      - "Detect coordinated abuse clusters"
+
+  - name: velocity_checker
+    description: "Check velocity rules for geographic or temporal anomalies"
+    category: verification
+    parameters:
+      - name: entity_id
+        type: string
+        required: true
+      - name: event_type
+        type: string
+        required: true
+      - name: time_window_hours
+        type: integer
+        default: 24
+      - name: max_events
+        type: integer
+        required: true
+    executor: velocity_verifier
+    examples:
+      - "Check if account has too many logins in 24h"
+      - "Detect impossible travel patterns"
+
+  - name: burst_detector
+    description: "Detect temporal bursts of activity (signup storms, rapid resource creation)"
+    category: analysis
+    parameters:
+      - name: entity_type
+        type: string
+        required: true
+      - name: event_type
+        type: string
+        required: true
+      - name: window_minutes
+        type: integer
+        default: 60
+      - name: threshold_multiplier
+        type: float
+        default: 3.0
+    executor: burst_analyzer
+    examples:
+      - "Detect signup storms from same IP"
+      - "Find rapid free-tier resource creation"
+
+  - name: graph_search
+    description: "Search graph for specific patterns using Cypher-like queries"
+    category: graph
+    parameters:
+      - name: pattern
+        type: string
+        required: true
+      - name: limit
+        type: integer
+        default: 100
+      - name: as_of
+        type: datetime
+        required: false
+    executor: graph_searcher
+    examples:
+      - "Find all accounts created in the last 7 days"
+      - "Search for shared payment methods"
+
+  - name: feature_extractor
+    description: "Extract temporal graph features for an entity"
+    category: analysis
+    parameters:
+      - name: entity_id
+        type: string
+        required: true
+      - name: feature_types
+        type: list
+        enum: [degree, centrality, temporal_stats, neighbor_features]
+        required: true
+      - name: window_days
+        type: integer
+        default: 30
+    executor: feature_engine
+    examples:
+      - "Extract centrality features for suspicious account"
+      - "Get temporal statistics for device usage"
+
+  - name: anomaly_scorer
+    description: "Score entities for anomaly likelihood using GNN embeddings"
+    category: ml
+    parameters:
+      - name: entity_ids
+        type: list
+        required: true
+      - name: model_version
+        type: string
+        default: latest
+      - name: threshold
+        type: float
+        default: 0.7
+    executor: anomaly_model
+    examples:
+      - "Score accounts for abuse likelihood"
+      - "Rank suspicious entities by anomaly score"
+
+  - name: evidence_collector
+    description: "Collect and summarize evidence for a hypothesis"
+    category: reasoning
+    parameters:
+      - name: hypothesis
+        type: string
+        required: true
+      - name: entity_ids
+        type: list
+        required: true
+      - name: evidence_types
+        type: list
+        required: false
+    executor: evidence_aggregator
+    examples:
+      - "Gather evidence for multi-account abuse claim"
+      - "Collect proof of policy violation"
+
+# Tool routing configuration
+routing:
+  method: semantic  # semantic | rule | hybrid
+  fallback_to_rules: true
+  confidence_threshold: 0.75
+
+  # Rule-based routing (fallback)
+  rules:
+    - pattern: "check|verify|validate|policy"
+      tools: [policy_checker, velocity_checker]
+    - pattern: "cluster|group|related"
+      tools: [cluster_detector, entity_linker]
+    - pattern: "timeline|history|temporal|change"
+      tools: [timeline_diff, feature_extractor]
+    - pattern: "burst|storm|spike|rapid"
+      tools: [burst_detector, velocity_checker]
+    - pattern: "query|search|find"
+      tools: [graph_search, kusto_query]

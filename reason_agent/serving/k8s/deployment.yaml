@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secgraph-rl-agent
+  labels:
+    app: secgraph-rl-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secgraph-rl-agent
+  template:
+    metadata:
+      labels:
+        app: secgraph-rl-agent
+    spec:
+      containers:
+      - name: agent-api
+        image: secgraph-rl-agent:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: NEO4J_URI
+          value: "bolt://neo4j-service:7687"
+        - name: AGENT_TOPOLOGY
+          value: "single"
+        - name: LLM_PROVIDER
+          value: "ollama"
+        - name: LOG_LEVEL
+          value: "INFO"
+        # Azure production endpoints (from ConfigMap/Secret)
+        - name: AZURE_COSMOS_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: secgraph-config
+              key: cosmos_endpoint
+        - name: AZURE_SEARCH_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: secgraph-config
+              key: search_endpoint
+        - name: AZURE_ADX_CLUSTER
+          valueFrom:
+            configMapKeyRef:
+              name: secgraph-config
+              key: adx_cluster
+        # Secrets
+        - name: AZURE_COSMOS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: secgraph-secrets
+              key: cosmos_key
+        - name: AZURE_SEARCH_KEY
+          valueFrom:
+            secretKeyRef:
+              name: secgraph-secrets
+              key: search_key
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/configs
+          readOnly: true
+        - name: artifacts-volume
+          mountPath: /app/artifacts
+      volumes:
+      - name: config-volume
+        configMap:
+          name: secgraph-config-files
+      - name: artifacts-volume
+        persistentVolumeClaim:
+          claimName: secgraph-artifacts-pvc

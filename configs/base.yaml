@@ -1,0 +1,95 @@
+# Base configuration for SecGraph-RL Agent
+
+# Agent topology: single | multi
+topology: single
+
+# Random seeds for reproducibility
+seeds:
+  random: 42
+  torch: 42
+  numpy: 42
+
+# Neo4j Graph Database
+neo4j:
+  uri: bolt://localhost:7687
+  user: neo4j
+  password: secgraph123
+  database: neo4j
+  max_connection_pool_size: 50
+  connection_timeout: 30
+
+# LLM Configuration
+llm:
+  provider: ollama  # ollama | openai | azure
+  model: llama2:7b
+  base_url: http://localhost:11434
+  temperature: 0.7
+  max_tokens: 2048
+  top_p: 0.9
+  use_fallback: true  # Use deterministic heuristic if LLM unavailable
+
+# Reasoning Configuration
+reasoning:
+  max_plan_steps: 10
+  max_tool_calls: 15
+  enable_trace_recording: true
+  trace_output_dir: artifacts/runs
+  enable_verification: true
+  early_stopping_on_success: true
+
+# Retrieval Configuration
+retrieval:
+  top_k: 5
+  similarity_threshold: 0.7
+  use_hybrid: false  # Hybrid keyword+vector (for Azure AI Search)
+  rerank: false
+
+# Temporal Graph Features
+temporal:
+  windows_days: [7, 14, 30]
+  decay_lambda: 0.1
+  enable_velocity_features: true
+  enable_burst_detection: true
+  session_timeout_minutes: 30
+
+# Verifiable Rewards
+rewards:
+  process_weight: 0.3
+  final_weight: 0.7
+  penalty_long_trace: -0.1
+  penalty_redundant_tool: -0.05
+  bonus_early_success: 0.2
+
+# Multi-Agent Configuration (when topology=multi)
+multi_agent:
+  agents:
+    - name: retriever
+      role: "Retrieve tools and documents from vector store and graph"
+      tools: [tool_search, graph_search, entity_linker]
+    - name: planner
+      role: "Plan reasoning steps and coordinate tool calls"
+      tools: [plan_generator, step_decomposer]
+    - name: verifier
+      role: "Verify policy compliance and correctness"
+      tools: [policy_checker, math_verifier, unittest_verifier]
+    - name: router
+      role: "Route queries and escalate complex cases"
+      tools: [query_router, escalation_handler]
+
+  communication:
+    mode: shared_memory  # shared_memory | message_passing
+    max_rounds: 5
+
+# Monitoring
+monitoring:
+  enable_drift_detection: true
+  drift_check_interval_hours: 24
+  drift_alert_threshold: 0.15
+  reward_ewma_alpha: 0.1
+
+# Logging
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  enable_structured_logs: true
+  enable_otel: false  # OpenTelemetry integration

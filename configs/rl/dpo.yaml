@@ -1,0 +1,142 @@
+# DPO (Direct Preference Optimization) configuration for SecGraph-RL Agent
+# Why DPO: Direct alignment with human preferences without brittle reward modeling
+# Source: "Direct Preference Optimization" (2023) - https://arxiv.org/abs/2305.18290
+# Enhanced: Offset-DPO & Dynamic-β DPO (2024) - https://aclanthology.org/2024.findings-acl.216/
+
+# Model configuration
+model:
+  base_model: null  # Will use planner LLM
+  reference_model: null  # If null, use frozen copy of base_model
+  adapter_path: artifacts/models/dpo_adapter
+  peft_config:
+    method: lora
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.1
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+    bias: none
+    task_type: CAUSAL_LM
+
+# Training hyperparameters
+training:
+  learning_rate: 5.0e-6
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  num_train_epochs: 1
+  warmup_steps: 50
+
+  # Optimization
+  optimizer: adamw
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+
+  # Scheduler
+  lr_scheduler_type: cosine
+  num_warmup_steps: 50
+
+# DPO specific parameters
+dpo:
+  # Beta parameter (inverse temperature)
+  # Controls strength of preference enforcement
+  # Higher β = stronger preference, lower exploration
+  beta: 0.1
+
+  # Dynamic beta (2024 enhancement)
+  # Adjusts β based on preference strength/confidence
+  use_dynamic_beta: true
+  beta_min: 0.05
+  beta_max: 0.5
+  beta_schedule: adaptive  # adaptive | linear | constant
+
+  # Offset-DPO (2024 enhancement)
+  # Handles preference magnitude (not just binary better/worse)
+  use_offset: true
+  offset_margin: 0.0  # Additional margin for strong preferences
+
+  # Label smoothing
+  label_smoothing: 0.0
+
+  # Loss type
+  loss_type: sigmoid  # sigmoid | hinge | ipo
+
+  # Reference model handling
+  reference_free: false  # If true, don't use reference model
+
+# Data configuration
+data:
+  train_file: data/audits/pairs.jsonl
+  eval_file: data/audits/eval_pairs.jsonl
+  max_length: 2048
+  max_prompt_length: 1024
+
+  # Data format: each line is a JSON with:
+  # - prompt: the query/task
+  # - chosen: preferred trace/response
+  # - rejected: dis-preferred trace/response
+  # - confidence: (optional) preference strength for dynamic-β
+
+  # Filtering
+  min_preference_gap: 0.0  # Minimum score difference
+  filter_low_confidence: false
+  confidence_threshold: 0.5
+
+# Preference pair generation
+preference_generation:
+  # How to create pairs from audit data
+  method: pairwise  # pairwise | ranking | best_of_n
+
+  # Ranking method (if method=ranking)
+  ranking:
+    top_k: 2
+    use_scores: true
+
+  # Best-of-N sampling (if method=best_of_n)
+  best_of_n:
+    n: 4
+    temperature: 0.8
+
+# Evaluation
+evaluation:
+  eval_steps: 100
+  eval_batch_size: 4
+  metrics:
+    - accuracy  # How often model prefers chosen over rejected
+    - margin    # Average margin of preference
+    - consistency  # Preference consistency
+
+# Logging & checkpointing
+logging:
+  log_interval: 10
+  save_steps: 200
+  save_total_limit: 3
+  logging_dir: artifacts/runs/dpo
+  report_to: []
+
+# Advanced options
+advanced:
+  # Contrastive loss weight
+  use_contrastive: false
+  contrastive_weight: 0.1
+
+  # Gradient checkpointing
+  enable_gradient_checkpointing: false
+
+  # Mixed precision
+  fp16: false
+
+  # Sync reference model periodically
+  sync_ref_model: false
+  sync_steps: 500
+
+# Expert audit integration
+audit:
+  enable_online_learning: true
+  batch_collection_interval_hours: 24
+  min_pairs_for_update: 10
+  canary_rollout: true
+  canary_traffic_percent: 10
+  rollback_on_degradation: true
+  degradation_threshold: 0.1  # Max acceptable reward drop

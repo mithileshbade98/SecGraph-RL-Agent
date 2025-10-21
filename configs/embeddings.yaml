@@ -1,0 +1,80 @@
+# Embeddings configuration for SecGraph-RL Agent
+
+# Text embedding model
+text_embeddings:
+  model: sentence-transformers/all-MiniLM-L6-v2  # Lightweight, CPU-friendly
+  # Alternative models:
+  # - sentence-transformers/all-mpnet-base-v2 (more accurate, slower)
+  # - thenlper/gte-small (competitive performance)
+  device: cpu  # cpu | mps | cuda
+  batch_size: 32
+  max_length: 512
+  normalize: true
+  pooling: mean
+
+# FAISS index configuration (local)
+faiss:
+  index_type: Flat  # Flat | IVF | HNSW
+  metric: cosine    # cosine | l2 | ip
+  dimension: 384    # Match MiniLM output
+  nlist: 100        # For IVF index
+  nprobe: 10        # Search parameter
+  ef_construction: 200  # For HNSW
+  ef_search: 50
+  store_on_disk: true
+  index_path: artifacts/faiss/tool_index.faiss
+  metadata_path: artifacts/faiss/tool_metadata.pkl
+
+# Azure AI Search (production)
+azure_search:
+  endpoint: https://secgraph-search.search.windows.net
+  index_name: tool-embeddings
+  api_version: "2024-07-01"  # Latest with higher vector quotas
+  vector_config:
+    algorithm: hnsw
+    dimensions: 384
+    similarity: cosine
+    ef_construction: 400
+    ef_search: 500
+    m: 4
+  hybrid:
+    enable: true  # Hybrid keyword + vector search
+    keyword_weight: 0.3
+    vector_weight: 0.7
+  fields:
+    - name: id
+      type: Edm.String
+      key: true
+    - name: content
+      type: Edm.String
+      searchable: true
+    - name: embedding
+      type: Collection(Edm.Single)
+      searchable: true
+      vector_search: true
+      dimensions: 384
+    - name: metadata
+      type: Edm.String
+      filterable: true
+
+# Tool cards for embedding
+tool_cards:
+  path: configs/tools.yaml
+  fields_to_embed:
+    - name
+    - description
+    - parameters
+    - examples
+
+# Caching
+cache:
+  enable: true
+  ttl_seconds: 3600
+  max_size: 10000
+  backend: memory  # memory | redis
+
+# Batch processing
+batch:
+  chunk_size: 100
+  num_workers: 4
+  show_progress: true
