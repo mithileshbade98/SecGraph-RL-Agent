@@ -59,13 +59,23 @@ def main():
     logger.info("\n[1/5] Generating synthetic security events...")
     from reason_agent.ingest.synthetic_generator import SyntheticDataGenerator
 
+    # Use lightweight mode for low-resource systems (M1 Mac, 8GB RAM)
+    lightweight = os.getenv('LIGHTWEIGHT_MODE', 'true').lower() == 'true'
+    logger.info(f"  Lightweight mode: {lightweight}")
+
     generator = SyntheticDataGenerator(seed=42)
-    parquet_file = generator.generate_all_anomalies(output_dir="data/synthetic")
+    parquet_file = generator.generate_all_anomalies(
+        output_dir="data/synthetic",
+        lightweight=lightweight
+    )
     logger.info(f"✓ Generated: {parquet_file}")
 
     # Step 2: Load into Neo4j
     logger.info("\n[2/5] Loading data into Neo4j...")
     from reason_agent.ingest.graph_loader import BiTemporalGraphLoader
+
+    # Use smaller batch size in lightweight mode
+    batch_size = 100 if lightweight else 500
 
     try:
         with BiTemporalGraphLoader(
@@ -73,13 +83,17 @@ def main():
             user=os.getenv('NEO4J_USER', 'neo4j'),
             password=os.getenv('NEO4J_PASSWORD', 'secgraph123'),
         ) as loader:
-            loader.load_from_parquet(parquet_file, batch_size=500)
+            logger.info(f"  Loading with batch_size={batch_size}...")
+            loader.load_from_parquet(parquet_file, batch_size=batch_size)
             stats = loader.get_graph_stats()
             logger.info(f"✓ Graph loaded: {stats}")
 
-            # Detect clusters
-            clusters = loader.detect_shared_device_clusters(min_accounts=3)
-            logger.info(f"✓ Detected {len(clusters)} suspicious device clusters")
+            # Skip expensive fraud detection in lightweight mode
+            if not lightweight:
+                clusters = loader.detect_shared_device_clusters(min_accounts=3)
+                logger.info(f"✓ Detected {len(clusters)} suspicious device clusters")
+            else:
+                logger.info("  Skipping fraud cluster detection (lightweight mode)")
     except Exception as e:
         logger.error(f"✗ Graph loading failed: {e}")
         # Continue anyway for demo purposes

@@ -33,8 +33,14 @@ class SyntheticDataGenerator:
         np.random.seed(seed)
         self.seed = seed
 
-    def generate_normal_users(self, num_users: int = 100) -> List[Dict[str, Any]]:
-        """Generate normal user behavior baseline."""
+    def generate_normal_users(self, num_users: int = 100, sessions_range: tuple = (10, 50)) -> List[Dict[str, Any]]:
+        """
+        Generate normal user behavior baseline.
+
+        Args:
+            num_users: Number of users to generate
+            sessions_range: (min, max) sessions per user
+        """
         users = []
         base_time = datetime.now() - timedelta(days=90)
 
@@ -45,7 +51,7 @@ class SyntheticDataGenerator:
             ip = f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
 
             # Normal activity pattern
-            num_sessions = random.randint(10, 50)
+            num_sessions = random.randint(*sessions_range)
             for j in range(num_sessions):
                 session_time = base_time + timedelta(days=random.randint(0, 90),
                                                       hours=random.randint(0, 23))
@@ -228,32 +234,49 @@ class SyntheticDataGenerator:
 
         return events
 
-    def generate_all_anomalies(self, output_dir: str = "data/synthetic") -> Path:
-        """Generate all 50+ anomaly types and save to parquet."""
+    def generate_all_anomalies(self, output_dir: str = "data/synthetic", lightweight: bool = False) -> Path:
+        """
+        Generate all 50+ anomaly types and save to parquet.
+
+        Args:
+            output_dir: Output directory for parquet file
+            lightweight: If True, generate minimal data for low-resource systems (M1 Mac, 8GB RAM)
+        """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         all_events = []
 
         # Generate baseline normal users
-        print("Generating normal user baseline...")
-        all_events.extend(self.generate_normal_users(num_users=100))
+        num_normal_users = 20 if lightweight else 100
+        sessions_range = (3, 8) if lightweight else (10, 50)
+        print(f"Generating normal user baseline ({num_normal_users} users, {sessions_range[0]}-{sessions_range[1]} sessions each)...")
+        all_events.extend(self.generate_normal_users(
+            num_users=num_normal_users,
+            sessions_range=sessions_range
+        ))
 
         # Generate specific anomaly patterns
-        print("Generating multi-email free-tier churn...")
-        all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=5))
+        if lightweight:
+            print("Generating minimal anomaly patterns (lightweight mode)...")
+            all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=3))
+            all_events.extend(self.generate_shared_device_fan_out(num_accounts=5))
+            all_events.extend(self.generate_ip_rotation_abuse(num_ips=5))
+        else:
+            print("Generating multi-email free-tier churn...")
+            all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=5))
 
-        print("Generating shared device fan-out...")
-        all_events.extend(self.generate_shared_device_fan_out(num_accounts=10))
+            print("Generating shared device fan-out...")
+            all_events.extend(self.generate_shared_device_fan_out(num_accounts=10))
 
-        print("Generating IP rotation abuse...")
-        all_events.extend(self.generate_ip_rotation_abuse(num_ips=20))
+            print("Generating IP rotation abuse...")
+            all_events.extend(self.generate_ip_rotation_abuse(num_ips=20))
 
-        print("Generating velocity violations...")
-        all_events.extend(self.generate_velocity_violation(num_logins=100))
+            print("Generating velocity violations...")
+            all_events.extend(self.generate_velocity_violation(num_logins=100))
 
-        print("Generating signup storm...")
-        all_events.extend(self.generate_signup_storm(num_accounts=50))
+            print("Generating signup storm...")
+            all_events.extend(self.generate_signup_storm(num_accounts=50))
 
         # Additional anomaly types (stubs for 50+ total)
         anomaly_stubs = [
@@ -267,8 +290,12 @@ class SyntheticDataGenerator:
             'account_takeover', 'free_tier_hopping',
         ]
 
-        for stub_type in anomaly_stubs[:20]:  # Add 20 more varied patterns
-            for i in range(random.randint(3, 8)):
+        # In lightweight mode, generate far fewer stub events
+        num_stub_types = 3 if lightweight else 20
+        stub_events_per_type = (2, 4) if lightweight else (3, 8)
+
+        for stub_type in anomaly_stubs[:num_stub_types]:
+            for i in range(random.randint(*stub_events_per_type)):
                 all_events.append({
                     'user_id': f"{stub_type}_{i}_{uuid.uuid4().hex[:6]}",
                     'email': f"{stub_type}{i}@example.com",
