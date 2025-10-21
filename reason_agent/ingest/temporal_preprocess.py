@@ -51,8 +51,8 @@ class TemporalFeatureExtractor:
                 # Rolling count
                 rolling_count = entity_df.rolling(window_str)[event_col].count()
 
-                # Rolling unique events
-                rolling_unique = entity_df.rolling(window_str)[event_col].nunique()
+                # Rolling unique events (apply nunique on rolling window)
+                rolling_unique = entity_df.rolling(window_str)[event_col].apply(lambda x: x.nunique(), raw=False)
 
                 # Store features
                 features.append({
