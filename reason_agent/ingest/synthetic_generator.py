@@ -3,6 +3,8 @@ Synthetic data generator for 50+ security anomaly archetypes.
 
 Generates realistic, PII-free datasets for testing multi-account abuse detection,
 free-tier churn, velocity violations, and other security patterns.
+
+Supports parallel processing for M1 Macs using multiprocessing.
 """
 
 import random
@@ -13,6 +15,8 @@ from pathlib import Path
 import numpy as np
 from dataclasses import dataclass, asdict
 import uuid
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 
 @dataclass
@@ -234,49 +238,127 @@ class SyntheticDataGenerator:
 
         return events
 
-    def generate_all_anomalies(self, output_dir: str = "data/synthetic", lightweight: bool = False) -> Path:
+    def _generate_normal_users_chunk(self, user_range: tuple, sessions_range: tuple) -> List[Dict[str, Any]]:
+        """Generate normal users for a specific range (for parallel processing)."""
+        start_idx, end_idx = user_range
+        users = []
+        base_time = datetime.now() - timedelta(days=90)
+
+        for i in range(start_idx, end_idx):
+            user_id = f"user_{i:06d}"
+            email = f"user{i}@example.com"
+            device_id = f"device_{i % 30:04d}"
+            ip = f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
+
+            num_sessions = random.randint(*sessions_range)
+            for j in range(num_sessions):
+                session_time = base_time + timedelta(days=random.randint(0, 90),
+                                                      hours=random.randint(0, 23))
+                users.append({
+                    'user_id': user_id,
+                    'email': email,
+                    'device_id': device_id,
+                    'ip_address': ip,
+                    'session_id': f"session_{user_id}_{j}",
+                    'timestamp': session_time,
+                    'event_type': 'login',
+                    'anomaly_type': 'normal',
+                    'geo_location': random.choice(['US-West', 'US-East', 'US-Central']),
+                })
+        return users
+
+    def generate_all_anomalies(self, output_dir: str = "data/synthetic", mode: str = "lightweight", use_parallel: bool = True) -> Path:
         """
         Generate all 50+ anomaly types and save to parquet.
 
         Args:
             output_dir: Output directory for parquet file
-            lightweight: If True, generate minimal data for low-resource systems (M1 Mac, 8GB RAM)
+            mode: "lightweight" (200 events), "demo" (800-1000 events), "full" (3500+ events)
+            use_parallel: Use multiprocessing for parallel generation (recommended for M1 Mac)
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         all_events = []
 
-        # Generate baseline normal users
-        num_normal_users = 20 if lightweight else 100
-        sessions_range = (3, 8) if lightweight else (10, 50)
+        # Configure based on mode
+        if mode == "lightweight":
+            num_normal_users = 20
+            sessions_range = (3, 8)
+            anomaly_config = {
+                'multi_email': 3,
+                'shared_device': 5,
+                'ip_rotation': 5,
+                'velocity': 0,
+                'signup_storm': 0,
+                'stub_types': 3,
+                'stub_events_per_type': (2, 4)
+            }
+        elif mode == "demo":
+            num_normal_users = 80  # More users for populated UI
+            sessions_range = (5, 12)  # Moderate sessions per user
+            anomaly_config = {
+                'multi_email': 10,
+                'shared_device': 15,
+                'ip_rotation': 15,
+                'velocity': 50,
+                'signup_storm': 20,
+                'stub_types': 15,
+                'stub_events_per_type': (3, 7)
+            }
+        else:  # full
+            num_normal_users = 100
+            sessions_range = (10, 50)
+            anomaly_config = {
+                'multi_email': 5,
+                'shared_device': 10,
+                'ip_rotation': 20,
+                'velocity': 100,
+                'signup_storm': 50,
+                'stub_types': 20,
+                'stub_events_per_type': (3, 8)
+            }
+
+        # Generate baseline normal users (PARALLEL)
         print(f"Generating normal user baseline ({num_normal_users} users, {sessions_range[0]}-{sessions_range[1]} sessions each)...")
-        all_events.extend(self.generate_normal_users(
-            num_users=num_normal_users,
-            sessions_range=sessions_range
-        ))
 
-        # Generate specific anomaly patterns
-        if lightweight:
-            print("Generating minimal anomaly patterns (lightweight mode)...")
-            all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=3))
-            all_events.extend(self.generate_shared_device_fan_out(num_accounts=5))
-            all_events.extend(self.generate_ip_rotation_abuse(num_ips=5))
+        if use_parallel and num_normal_users > 20:
+            num_cores = min(cpu_count(), 8)  # Use up to 8 cores on M1
+            chunk_size = num_normal_users // num_cores
+            user_ranges = [(i * chunk_size, (i + 1) * chunk_size if i < num_cores - 1 else num_normal_users)
+                          for i in range(num_cores)]
+
+            print(f"  Using {num_cores} parallel processes...")
+            with Pool(num_cores) as pool:
+                partial_func = partial(self._generate_normal_users_chunk, sessions_range=sessions_range)
+                results = pool.map(partial_func, user_ranges)
+                for chunk in results:
+                    all_events.extend(chunk)
         else:
-            print("Generating multi-email free-tier churn...")
-            all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=5))
+            all_events.extend(self.generate_normal_users(
+                num_users=num_normal_users,
+                sessions_range=sessions_range
+            ))
 
-            print("Generating shared device fan-out...")
-            all_events.extend(self.generate_shared_device_fan_out(num_accounts=10))
+        print(f"  Generated {len(all_events)} normal events")
 
-            print("Generating IP rotation abuse...")
-            all_events.extend(self.generate_ip_rotation_abuse(num_ips=20))
+        # Generate specific anomaly patterns (SEQUENTIAL for now - these are fast)
+        print(f"Generating {mode} anomaly patterns...")
 
-            print("Generating velocity violations...")
-            all_events.extend(self.generate_velocity_violation(num_logins=100))
+        if anomaly_config['multi_email'] > 0:
+            all_events.extend(self.generate_multi_email_free_tier_churn(num_accounts=anomaly_config['multi_email']))
 
-            print("Generating signup storm...")
-            all_events.extend(self.generate_signup_storm(num_accounts=50))
+        if anomaly_config['shared_device'] > 0:
+            all_events.extend(self.generate_shared_device_fan_out(num_accounts=anomaly_config['shared_device']))
+
+        if anomaly_config['ip_rotation'] > 0:
+            all_events.extend(self.generate_ip_rotation_abuse(num_ips=anomaly_config['ip_rotation']))
+
+        if anomaly_config['velocity'] > 0:
+            all_events.extend(self.generate_velocity_violation(num_logins=anomaly_config['velocity']))
+
+        if anomaly_config['signup_storm'] > 0:
+            all_events.extend(self.generate_signup_storm(num_accounts=anomaly_config['signup_storm']))
 
         # Additional anomaly types (stubs for 50+ total)
         anomaly_stubs = [
@@ -290,10 +372,10 @@ class SyntheticDataGenerator:
             'account_takeover', 'free_tier_hopping',
         ]
 
-        # In lightweight mode, generate far fewer stub events
-        num_stub_types = 3 if lightweight else 20
-        stub_events_per_type = (2, 4) if lightweight else (3, 8)
+        num_stub_types = anomaly_config['stub_types']
+        stub_events_per_type = anomaly_config['stub_events_per_type']
 
+        print(f"  Generating {num_stub_types} additional anomaly types...")
         for stub_type in anomaly_stubs[:num_stub_types]:
             for i in range(random.randint(*stub_events_per_type)):
                 all_events.append({

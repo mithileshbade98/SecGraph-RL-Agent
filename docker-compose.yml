@@ -43,7 +43,8 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=secgraph123
       - NEO4J_DATABASE=neo4j
-      - LIGHTWEIGHT_MODE=true  # Enable for M1 Mac with 8GB RAM
+      - DATA_MODE=demo  # lightweight (200 events) / demo (800-1000 events) / full (3500+ events)
+      - USE_PARALLEL=true  # Enable parallel processing for M1 Mac
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
     volumes:

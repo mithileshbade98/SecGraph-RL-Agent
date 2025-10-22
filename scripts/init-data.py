@@ -73,14 +73,16 @@ def main():
     log_progress(1, total_steps, "[1/5] Generating synthetic security events...")
     from reason_agent.ingest.synthetic_generator import SyntheticDataGenerator
 
-    # Use lightweight mode for low-resource systems (M1 Mac, 8GB RAM)
-    lightweight = os.getenv('LIGHTWEIGHT_MODE', 'true').lower() == 'true'
-    logger.info(f"  Lightweight mode: {lightweight}")
+    # Use mode from environment: lightweight (200 events) / demo (800-1000 events) / full (3500+ events)
+    mode = os.getenv('DATA_MODE', 'demo')  # Default to demo for populated UI
+    use_parallel = os.getenv('USE_PARALLEL', 'true').lower() == 'true'
+    logger.info(f"  Data mode: {mode}, Parallel processing: {use_parallel}")
 
     generator = SyntheticDataGenerator(seed=42)
     parquet_file = generator.generate_all_anomalies(
         output_dir="data/synthetic",
-        lightweight=lightweight
+        mode=mode,
+        use_parallel=use_parallel
     )
     log_progress(1, total_steps, f"✓ Step 1 complete: {parquet_file}", 100)
 
@@ -88,8 +90,12 @@ def main():
     log_progress(2, total_steps, "[2/5] Loading data into Neo4j...")
     from reason_agent.ingest.graph_loader import BiTemporalGraphLoader
 
-    # Use smaller batch size in lightweight mode
-    batch_size = 100 if lightweight else 500
+    # Use optimal batch size based on mode
+    batch_size = {
+        'lightweight': 100,
+        'demo': 200,  # Balanced for speed + memory
+        'full': 500
+    }.get(mode, 200)
 
     try:
         with BiTemporalGraphLoader(
@@ -104,8 +110,8 @@ def main():
             stats = loader.get_graph_stats()
             logger.info(f"  Graph loaded: {stats}")
 
-            # Skip expensive fraud detection in lightweight mode
-            if not lightweight:
+            # Run fraud detection for demo and full modes (skip for lightweight only)
+            if mode != 'lightweight':
                 log_progress(2, total_steps, "  Detecting fraud clusters...", 85)
                 clusters = loader.detect_shared_device_clusters(min_accounts=3)
                 logger.info(f"  Detected {len(clusters)} suspicious device clusters")
