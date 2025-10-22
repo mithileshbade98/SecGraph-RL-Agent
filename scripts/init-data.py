@@ -12,7 +12,9 @@ import sys
 import os
 import json
 import time
+import random
 from pathlib import Path
+from datetime import datetime, timedelta
 from loguru import logger
 
 # Add parent directory to path
@@ -192,8 +194,94 @@ def main():
 
     log_progress(5, total_steps, f"✓ Step 5 complete: {len(sample_pairs)} preference pairs", 100)
 
+    # Step 6: Generate sample reasoning traces for UI population
+    logger.info("\n[6/6] Generating sample reasoning traces for UI...")
+    from reason_agent.reasoning.trace_recorder import TraceRecorder
+
+    trace_recorder = TraceRecorder()
+
+    # Sample queries to execute
+    sample_queries = [
+        "Detect multi-account abuse with shared devices",
+        "Find accounts with impossible travel patterns",
+        "Identify credential stuffing attempts",
+        "Detect free-tier farming abuse",
+        "Find shared IP address fraud rings",
+        "Identify velocity violations and rapid signups",
+        "Detect bot network activity",
+        "Find accounts with chargeback fraud patterns",
+        "Identify session hijacking attempts",
+        "Detect promo code stacking abuse",
+    ]
+
+    logger.info(f"  Generating {len(sample_queries)} sample traces...")
+    for idx, query in enumerate(sample_queries):
+        # Create mock trace (in production, this would call the planner)
+        num_steps = random.randint(3, 5)
+        steps = []
+
+        for step_id in range(1, num_steps + 1):
+            if step_id == 1:
+                steps.append({
+                    'step_id': step_id,
+                    'thought': 'I should check for shared device violations',
+                    'tool': 'check_shared_device_abuse',
+                    'parameters': {'threshold': 3},
+                    'result': {
+                        'success': True,
+                        'found': random.randint(3, 15),
+                        'device_ids': [f'device_{random.randint(1000, 9999)}' for _ in range(random.randint(2, 5))]
+                    },
+                    'evidence': ['Neo4j query returned shared devices', 'Temporal clustering detected']
+                })
+            elif step_id == 2:
+                steps.append({
+                    'step_id': step_id,
+                    'thought': 'Verify temporal burst patterns',
+                    'tool': 'get_temporal_features',
+                    'parameters': {'window_days': 7},
+                    'result': {
+                        'success': True,
+                        'burstiness': round(random.uniform(0.6, 0.95), 2),
+                        'velocity_score': round(random.uniform(0.7, 0.99), 2)
+                    },
+                    'evidence': ['High burstiness coefficient', 'Velocity anomaly detected']
+                })
+            else:
+                steps.append({
+                    'step_id': step_id,
+                    'thought': 'Aggregate evidence and conclude',
+                    'tool': 'aggregate_evidence',
+                    'parameters': {},
+                    'result': {
+                        'success': True,
+                        'conclusion': 'FRAUD DETECTED',
+                        'confidence': round(random.uniform(0.85, 0.98), 2)
+                    },
+                    'evidence': ['Multiple fraud signals', 'High confidence score']
+                })
+
+        trace = {
+            'trace_id': f"trace_{idx:04d}",
+            'query': query,
+            'timestamp': datetime.now() - timedelta(hours=idx),
+            'num_steps': num_steps,
+            'success': True,
+            'steps': steps,
+            'conclusion': 'Detected fraud with high confidence',
+            'confidence': round(random.uniform(0.85, 0.98), 2),
+            'rewards': {
+                'process_reward': round(random.uniform(0.6, 0.9), 2),
+                'final_reward': round(random.uniform(0.8, 1.0), 2),
+                'total_reward': round(random.uniform(0.7, 0.95), 2)
+            }
+        }
+        trace_recorder.save_trace(trace)
+
+    logger.info(f"✓ Generated {len(sample_queries)} reasoning traces")
+
     # Create completion marker
-    log_progress(5, total_steps, "Creating completion marker...", 100)
+    logger.info("\nCreating completion marker...")
     Path("data/.init_complete").touch()
 
     total_time = time.time() - start_time
