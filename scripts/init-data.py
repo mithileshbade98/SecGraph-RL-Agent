@@ -264,7 +264,7 @@ def main():
         trace = {
             'trace_id': f"trace_{idx:04d}",
             'query': query,
-            'timestamp': datetime.now() - timedelta(hours=idx),
+            'timestamp': (datetime.now() - timedelta(hours=idx)).isoformat(),
             'num_steps': num_steps,
             'success': True,
             'steps': steps,
