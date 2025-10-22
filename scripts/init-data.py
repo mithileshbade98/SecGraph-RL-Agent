@@ -276,7 +276,7 @@ def main():
                 'total_reward': round(random.uniform(0.7, 0.95), 2)
             }
         }
-        trace_recorder.save_trace(trace)
+        trace_recorder.save_trace(trace['trace_id'], trace)
 
     logger.info(f"✓ Generated {len(sample_queries)} reasoning traces")
 
