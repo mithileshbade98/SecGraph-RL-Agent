@@ -2,22 +2,6 @@
 
 **Security-grade RL agent for multi-account abuse detection with graph reasoning and verifiable rewards.**
 
----
-
-## 🎥 Complete Project Walkthrough
-
-**[Watch the Full Project Presentation Demo](https://drive.google.com/file/d/1iy81h27XARrcMLKR9tlVONwjd2hlYzkI/view?usp=sharing)**
-
-A comprehensive technical walkthrough covering:
-- **Architecture deep-dive** - System design and component interactions
-- **Code walkthrough** - Implementation details and key modules
-- **Research foundations** - Paper citations and design rationale
-- **Live demonstration** - End-to-end agent execution and reasoning
-
-**Start here for the complete picture of how SecGraph-RL Agent works.**
-
----
-
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
