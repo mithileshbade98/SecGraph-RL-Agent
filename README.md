@@ -39,6 +39,40 @@ SecGraph-RL Agent detects complex security anomalies (multi-account abuse, free-
 
 ---
 
+## 📋 Implementation Status
+
+### ✅ Fully Implemented & Production-Ready
+- **Graph infrastructure**: Neo4j temporal graphs with bitemporal tracking
+- **Data ingestion**: Synthetic data generation (2000+ events, 50+ anomaly types)
+- **Tool system**: Registry, semantic router, FAISS vector search
+- **Reasoning engine**: Step-by-step planning with trace recording
+- **Reward computation**: Verifiable rewards (policy checks, math verification)
+- **Streamlit UI**: 5-tab interface (Query, Graph, RL Training, Audits, Drift)
+- **Docker deployment**: One-command setup with all services
+- **API service**: FastAPI server with endpoints
+
+### ⚙️ Configuration-Ready (Simulated Execution)
+- **RL Training**: PPO and DPO trainers generate realistic metrics and learning curves, but do **not** perform actual model training
+  - ✅ Complete YAML configurations with hyperparameters
+  - ✅ Working CLI commands (`make train-ppo`, `make train-dpo`)
+  - ⚠️ Mock implementations that simulate training progression
+  - ❌ No actual gradient updates or model optimization
+
+- **LoRA Adapters**: Comprehensive configuration defined, but **not instantiated**
+  - ✅ PEFT config in YAML (rank, alpha, target modules)
+  - ❌ No `LoraConfig` instantiation or `get_peft_model()` calls
+  - ❌ No adapter saving/loading logic
+  - ❌ No integration with LLM inference
+
+### 🔮 Architectural Design (Research-Backed)
+- **GNN embeddings**: GraphSAGE/GAT architecture designed for temporal graphs
+- **Azure production**: Architecture documented for Cosmos DB, ADX, AI Search
+- **Multi-agent topology**: Configurable architecture for specialized agents
+
+**Note:** This project showcases **system architecture and integration patterns** for RL-powered security agents. The RL training components are infrastructure-complete with realistic simulations, designed to demonstrate production deployment patterns rather than active model training.
+
+---
+
 ## 🚀 Docker Quick Start (One Command!)
 
 **The fastest way to get started:**
@@ -263,7 +297,9 @@ secgraph-rl-agent/
 - [DPO: Direct Preference Optimization](https://arxiv.org/abs/2305.18290) (Rafailov et al., 2023)
 - [Offset-DPO & Dynamic-β](https://aclanthology.org/2024.findings-acl.216/) (ACL 2024) - Handles preference magnitude and data quality.
 
-**Impact:** DPO improves trace quality by 15-30% vs RLHF in our experiments, with faster convergence.
+**Impact:** DPO improves trace quality by 15-30% vs RLHF in literature, with faster convergence.
+
+**Implementation Status:** Infrastructure complete with comprehensive configuration (dynamic β, offset-DPO, online learning). Current DPOTrainer simulates training metrics for demonstration. Preference data loader and audit UI fully functional.
 
 ---
 
@@ -274,7 +310,9 @@ secgraph-rl-agent/
 **Source:**
 - [RL with Verifiable Rewards for Reasoning](https://arxiv.org/abs/2410.15246) (2025)
 
-**Impact:** RLVR increases success@1 on math tasks by 20-40% by rewarding intermediate steps.
+**Impact:** RLVR increases success@1 on math tasks by 20-40% by rewarding intermediate steps in literature.
+
+**Implementation Status:** RewardComputer fully implemented with process rewards (tool success rates), final rewards (verification status), penalties (long traces, redundant calls), and bonuses (early success). PPOTrainer infrastructure complete with realistic simulation for demonstration purposes.
 
 ---
 
@@ -355,6 +393,8 @@ secgraph-rl-agent/
 
 **Impact:** LoRA adapters train 10x faster and use 80% less memory than full fine-tuning.
 
+**Implementation Status:** Configuration-ready with complete YAML specifications (rank=16, alpha=32, target_modules), but not yet instantiated in the training code. Designed for future integration with production LLM fine-tuning.
+
 ---
 
 ## 🎨 Single-Agent vs Multi-Agent (When to Choose)
@@ -398,8 +438,8 @@ make neo4j-down     # Stop Neo4j container
 make ingest         # Generate synthetic data + load graph + extract features
 make index          # Build FAISS vector index from tool cards
 make run            # Run end-to-end agent query
-make train-dpo      # Train DPO on expert audit pairs
-make train-ppo      # Train PPO on verifiable math tasks
+make train-dpo      # Simulate DPO training (generates metrics, no actual model training)
+make train-ppo      # Simulate PPO training (generates metrics, no actual model training)
 make eval           # Run evaluation suite on 50+ anomaly scenarios
 make ui             # Launch Streamlit UI (5 tabs)
 make api            # Run FastAPI server (localhost:8000)
