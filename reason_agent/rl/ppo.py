@@ -75,9 +75,10 @@ class PPOTrainer:
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
 
+        self.model_config = self.config.get('model', {})
         self.training_config = self.config.get('training', {})
         self.reward_config = self.config.get('rewards', {})
-        self.peft_config = self.config.get('peft_config', {})
+        self.peft_config = self.model_config.get('peft_config', {})
         self.advanced_config = self.config.get('advanced', {})
 
         # Distributed training setup
@@ -88,7 +89,7 @@ class PPOTrainer:
             logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
         # Model configuration
-        self.base_model_name = base_model or self.config.get('base_model')
+        self.base_model_name = base_model or self.model_config.get('base_model')
         self.model = None
         self.tokenizer = None
         self.use_value_head = use_value_head
