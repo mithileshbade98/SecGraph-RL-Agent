@@ -26,6 +26,20 @@ echo "✓ Docker is running"
 echo "✓ docker-compose is available"
 echo ""
 
+# Download model if not already cached
+echo "Checking/downloading TinyLlama model..."
+if command -v python3 &> /dev/null; then
+    python3 scripts/download_model.py
+    if [ $? -ne 0 ]; then
+        echo "⚠️  Warning: Model download failed, but continuing..."
+        echo "You can manually download later with: python3 scripts/download_model.py"
+    fi
+else
+    echo "⚠️  Warning: python3 not found, skipping model download"
+    echo "Install python3 and run: python3 scripts/download_model.py"
+fi
+echo ""
+
 # Clean up any existing containers
 echo "Cleaning up existing containers..."
 docker-compose down -v 2>/dev/null || true

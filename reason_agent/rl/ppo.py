@@ -55,7 +55,7 @@ class PPOTrainer:
         self,
         config_path: Optional[Path] = None,
         base_model: Optional[str] = None,
-        initialize_model: bool = False,
+        initialize_model: bool = True,
         checkpoint_dir: Optional[Path] = None,
         use_value_head: bool = True,
     ):
@@ -65,9 +65,9 @@ class PPOTrainer:
         Args:
             config_path: Path to ppo.yaml config
             base_model: Base model name/path (if None, use from config)
-            initialize_model: Whether to initialize the PEFT model immediately
+            initialize_model: Whether to initialize the PEFT model immediately (default: True)
             checkpoint_dir: Directory for checkpoints (default: artifacts/checkpoints/ppo)
-            use_value_head: Whether to use actual value head (vs mock values)
+            use_value_head: Whether to use actual value head
         """
         if config_path is None:
             config_path = Path("configs/rl/ppo.yaml")
@@ -187,15 +187,16 @@ class PPOTrainer:
 
         except Exception as e:
             logger.error(f"Failed to initialize PEFT model: {e}")
-            logger.warning("Training will proceed in simulation mode without actual model")
-            self.model = None
-            self.tokenizer = None
+            raise RuntimeError(
+                f"Model initialization failed: {e}\n"
+                "Make sure the model is downloaded and accessible. "
+                "Run: python3 scripts/download_model.py"
+            )
 
     def train(
         self,
         num_episodes: int = 100,
         save_path: Optional[Path] = None,
-        use_actual_training: bool = True,
         training_data: Optional[list] = None,
         val_data: Optional[list] = None,
         resume_from_checkpoint: bool = True,
@@ -206,7 +207,6 @@ class PPOTrainer:
         Args:
             num_episodes: Number of training episodes
             save_path: Path to save trained adapter
-            use_actual_training: If True and model is initialized, use actual training
             training_data: Optional training data (list of dicts with query/response/reward)
             val_data: Optional validation data for evaluation
             resume_from_checkpoint: Whether to resume from latest checkpoint if available
@@ -214,11 +214,17 @@ class PPOTrainer:
         Returns:
             Training metrics
         """
+        if self.model is None or self.optimizer is None:
+            raise RuntimeError(
+                "Model not initialized! PPO trainer requires a model to train. "
+                "Make sure base_model is configured in ppo.yaml and the model downloads successfully."
+            )
+
         logger.info(f"Starting PPO training for {num_episodes} episodes...")
 
         # Try to resume from checkpoint
         start_episode = 0
-        if resume_from_checkpoint and self.model is not None:
+        if resume_from_checkpoint:
             checkpoint = self.checkpointer.resume_from_latest(
                 model=self.model,
                 optimizer=self.optimizer,
@@ -228,13 +234,8 @@ class PPOTrainer:
                 start_episode = checkpoint.get('epoch', 0) + 1
                 logger.info(f"Resumed from episode {start_episode}")
 
-        # Choose training mode
-        if use_actual_training and self.model is not None and self.optimizer is not None:
-            logger.info("Using ACTUAL PPO training with model updates")
-            return self._train_actual(num_episodes, save_path, training_data, val_data, start_episode)
-        else:
-            logger.warning("Using SIMULATION mode (no model updates)")
-            return self._train_simulation(num_episodes, save_path)
+        logger.info("🔥 Using ACTUAL PPO training with model updates")
+        return self._train_actual(num_episodes, save_path, training_data, val_data, start_episode)
 
     def _train_actual(
         self,
@@ -504,71 +505,6 @@ class PPOTrainer:
             num_episodes, save_path
         )
 
-    def _train_simulation(
-        self,
-        num_episodes: int,
-        save_path: Optional[Path],
-    ) -> Dict[str, Any]:
-        """
-        Simulation mode training (generates mock metrics).
-
-        Args:
-            num_episodes: Number of episodes
-            save_path: Save path
-
-        Returns:
-            Mock training metrics
-        """
-        logger.warning("⚠️  Running in SIMULATION mode - no actual model updates")
-
-        mean_rewards = []
-        policy_losses = []
-        value_losses = []
-        kl_divs = []
-
-        # Initial baseline reward
-        baseline = 0.45
-
-        for episode in range(num_episodes):
-            # Simulate realistic learning curve with noise
-            progress = episode / num_episodes
-
-            # Three-phase learning: explore → learn → converge
-            if progress < 0.2:
-                # Exploration phase: low, noisy rewards
-                mean_reward = baseline + random.uniform(-0.1, 0.05)
-            elif progress < 0.7:
-                # Learning phase: steady improvement
-                improvement = (progress - 0.2) / 0.5  # 0 to 1
-                mean_reward = baseline + 0.35 * improvement + random.uniform(-0.05, 0.05)
-            else:
-                # Convergence phase: plateau with small noise
-                mean_reward = baseline + 0.35 + random.uniform(-0.02, 0.02)
-
-            mean_rewards.append(mean_reward)
-
-            # Policy loss (decreases over time)
-            policy_loss = 0.8 / (1 + progress * 5) + random.uniform(-0.05, 0.05)
-            policy_losses.append(max(0.01, policy_loss))
-
-            # Value loss (decreases over time)
-            value_loss = 0.6 / (1 + progress * 4) + random.uniform(-0.04, 0.04)
-            value_losses.append(max(0.01, value_loss))
-
-            # KL divergence (should stay low for PPO)
-            kl_div = 0.08 / (1 + progress * 2) + random.uniform(-0.01, 0.01)
-            kl_divs.append(max(0.001, kl_div))
-
-            if (episode + 1) % 10 == 0:
-                avg_reward = sum(mean_rewards[-10:]) / 10
-                logger.info(f"Episode {episode + 1}/{num_episodes}, Avg Reward: {avg_reward:.3f}, "
-                           f"Policy Loss: {policy_losses[-1]:.3f}, KL: {kl_divs[-1]:.4f}")
-
-        return self._save_training_metrics(
-            mean_rewards, policy_losses, value_losses, kl_divs,
-            num_episodes, save_path
-        )
-
     def _save_training_metrics(
         self,
         mean_rewards: list,
@@ -609,32 +545,19 @@ class PPOTrainer:
         logger.info(f"Metrics saved to {metrics_file}")
 
         # Save adapter
-        if save_path:
+        if save_path and self.model is not None and self.tokenizer is not None:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # If we have an actual model, save the LoRA adapter
-            if self.model is not None and self.tokenizer is not None:
-                try:
-                    save_lora_adapter(
-                        model=self.model,
-                        save_path=save_path,
-                        tokenizer=self.tokenizer,
-                    )
-                    logger.success(f"LoRA adapter saved to {save_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save LoRA adapter: {e}")
-            else:
-                logger.info(f"Adapter path prepared at {save_path}")
-                logger.warning("No model initialized - adapter not saved (running in simulation mode)")
-
-                # Create placeholder to indicate training completed
-                placeholder_file = save_path / "training_completed.txt"
-                save_path.mkdir(parents=True, exist_ok=True)
-                with open(placeholder_file, 'w') as f:
-                    f.write(f"PPO training completed at {datetime.now().isoformat()}\n")
-                    f.write(f"Final reward: {metrics['final_avg_reward']:.3f}\n")
-                    f.write("Note: Run with actual base model to save LoRA weights\n")
+            try:
+                save_lora_adapter(
+                    model=self.model,
+                    save_path=save_path,
+                    tokenizer=self.tokenizer,
+                )
+                logger.success(f"LoRA adapter saved to {save_path}")
+            except Exception as e:
+                logger.error(f"Failed to save LoRA adapter: {e}")
 
         return metrics
 
