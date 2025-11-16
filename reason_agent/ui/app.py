@@ -143,33 +143,52 @@ with tab3:
     with train_col1:
         st.subheader("PPO Training")
         st.write("Train with verifiable rewards on math tasks")
-        ppo_episodes = st.number_input("Episodes", value=100, key="ppo_ep")
+        st.info("Model: TinyLlama-1.1B-Chat-v1.0 (downloads automatically if not cached)")
+        ppo_episodes = st.number_input("Episodes", value=10, min_value=1, max_value=100, key="ppo_ep")
 
         if st.button("Train PPO"):
             from reason_agent.rl.ppo import PPOTrainer
-            with st.spinner("Training PPO..."):
-                trainer = PPOTrainer()
-                metrics = trainer.train(num_episodes=ppo_episodes)
+            try:
+                with st.spinner("Initializing model and trainer..."):
+                    trainer = PPOTrainer(
+                        initialize_model=True,
+                        use_value_head=True,
+                    )
 
-            st.success(f"Training complete! Final reward: {metrics['final_avg_reward']:.3f}")
-            st.line_chart(pd.DataFrame({
-                'Episode': range(len(metrics['mean_rewards'])),
-                'Reward': metrics['mean_rewards']
-            }).set_index('Episode'))
+                with st.spinner(f"Training PPO for {ppo_episodes} episodes..."):
+                    metrics = trainer.train(num_episodes=ppo_episodes)
+
+                st.success(f"Training complete! Final reward: {metrics['final_avg_reward']:.3f}")
+                st.line_chart(pd.DataFrame({
+                    'Episode': range(len(metrics['mean_rewards'])),
+                    'Reward': metrics['mean_rewards']
+                }).set_index('Episode'))
+            except Exception as e:
+                st.error(f"Training failed: {str(e)}")
+                st.info("Make sure the model is downloaded. Run: python3 scripts/download_model.py")
 
     with train_col2:
         st.subheader("DPO Training")
         st.write("Train with preference pairs from audits")
-        dpo_epochs = st.number_input("Epochs", value=1, key="dpo_ep")
+        st.info("Model: TinyLlama-1.1B-Chat-v1.0 (downloads automatically if not cached)")
+        dpo_epochs = st.number_input("Epochs", value=1, min_value=1, max_value=10, key="dpo_ep")
 
         if st.button("Train DPO"):
             from reason_agent.rl.dpo import DPOTrainer
-            with st.spinner("Training DPO..."):
-                trainer = DPOTrainer()
-                metrics = trainer.train(num_epochs=dpo_epochs)
+            try:
+                with st.spinner("Initializing model and trainer..."):
+                    trainer = DPOTrainer(
+                        initialize_model=True,
+                    )
 
-            st.success(f"Training complete! Accuracy: {metrics['final_accuracy']:.3f}")
-            st.write(f"Trained on {metrics['num_pairs']} preference pairs")
+                with st.spinner(f"Training DPO for {dpo_epochs} epochs..."):
+                    metrics = trainer.train(num_epochs=dpo_epochs)
+
+                st.success(f"Training complete! Accuracy: {metrics['final_accuracy']:.3f}")
+                st.write(f"Trained on {metrics['num_pairs']} preference pairs")
+            except Exception as e:
+                st.error(f"Training failed: {str(e)}")
+                st.info("Make sure the model is downloaded and preference pairs exist in data/audits/pairs.jsonl")
 
 # Tab 4: Audits
 with tab4:
