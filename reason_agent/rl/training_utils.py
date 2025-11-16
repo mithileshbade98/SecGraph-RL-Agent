@@ -8,7 +8,7 @@ Provides:
 - Reward computation utilities
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 import torch
 import torch.nn.functional as F
 from loguru import logger
