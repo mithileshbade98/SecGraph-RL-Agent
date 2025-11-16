@@ -50,6 +50,7 @@ services:
     volumes:
       - shared_data:/app/data
       - shared_artifacts:/app/artifacts
+      - shared_models:/app/models
     networks:
       - secgraph-network
     command: python scripts/init-data.py
@@ -84,6 +85,7 @@ services:
     volumes:
       - shared_data:/app/data:ro
       - shared_artifacts:/app/artifacts
+      - shared_models:/app/models:ro
       - ./configs:/app/configs:ro
     networks:
       - secgraph-network
@@ -95,6 +97,8 @@ services:
       start_period: 60s
     command: >
       sh -c "
+        echo 'Ensuring model is downloaded...' &&
+        python3 scripts/download_model.py || echo 'Model already cached or will be downloaded on demand' &&
         echo 'Waiting for data initialization...' &&
         while [ ! -f /app/data/.init_complete ]; do sleep 2; done &&
         echo 'Starting API service...' &&
@@ -131,6 +135,7 @@ services:
     volumes:
       - shared_data:/app/data
       - shared_artifacts:/app/artifacts
+      - shared_models:/app/models:ro
       - ./configs:/app/configs:ro
     networks:
       - secgraph-network
@@ -160,6 +165,8 @@ volumes:
   shared_data:
     driver: local
   shared_artifacts:
+    driver: local
+  shared_models:
     driver: local
 
 networks:

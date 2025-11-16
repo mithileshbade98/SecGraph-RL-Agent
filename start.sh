@@ -26,20 +26,6 @@ echo "✓ Docker is running"
 echo "✓ docker-compose is available"
 echo ""
 
-# Download model if not already cached
-echo "Checking/downloading TinyLlama model..."
-if command -v python3 &> /dev/null; then
-    python3 scripts/download_model.py
-    if [ $? -ne 0 ]; then
-        echo "⚠️  Warning: Model download failed, but continuing..."
-        echo "You can manually download later with: python3 scripts/download_model.py"
-    fi
-else
-    echo "⚠️  Warning: python3 not found, skipping model download"
-    echo "Install python3 and run: python3 scripts/download_model.py"
-fi
-echo ""
-
 # Clean up any existing containers
 echo "Cleaning up existing containers..."
 docker-compose down -v 2>/dev/null || true
@@ -49,14 +35,15 @@ echo ""
 echo "Building and starting services..."
 echo "This will:"
 echo "  1. Build the application Docker image"
-echo "  2. Start Neo4j database"
-echo "  3. Generate synthetic security data (50+ anomaly types)"
-echo "  4. Load data into Neo4j graph"
-echo "  5. Build FAISS vector index"
-echo "  6. Start API service (port 8000)"
-echo "  7. Start Streamlit UI (port 8501)"
+echo "  2. Download TinyLlama-1.1B model (~2GB, cached for future runs)"
+echo "  3. Start Neo4j database"
+echo "  4. Generate synthetic security data (50+ anomaly types)"
+echo "  5. Load data into Neo4j graph"
+echo "  6. Build FAISS vector index"
+echo "  7. Start API service (port 8000)"
+echo "  8. Start Streamlit UI (port 8501)"
 echo ""
-echo "This may take 5-10 minutes on first run..."
+echo "This may take 5-10 minutes on first run (includes model download)..."
 echo ""
 
 docker-compose up --build -d
