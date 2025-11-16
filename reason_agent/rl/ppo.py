@@ -38,6 +38,14 @@ from reason_agent.rl.value_head import ModelWithValueHead
 from reason_agent.rl.schedulers import get_scheduler
 from reason_agent.rl.checkpointing import TrainingCheckpointer
 from reason_agent.rl.evaluator import ModelEvaluator
+from reason_agent.rl.distributed import (
+    setup_distributed,
+    is_distributed,
+    is_main_process,
+    wrap_model_ddp,
+    DistributedMetrics,
+    DistributedConfig,
+)
 
 
 class PPOTrainer:
@@ -70,6 +78,14 @@ class PPOTrainer:
         self.training_config = self.config.get('training', {})
         self.reward_config = self.config.get('rewards', {})
         self.peft_config = self.config.get('peft_config', {})
+        self.advanced_config = self.config.get('advanced', {})
+
+        # Distributed training setup
+        self.use_distributed = self.advanced_config.get('use_distributed', False)
+        self.distributed_config = None
+        if self.use_distributed:
+            self.distributed_config = setup_distributed()
+            logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
         # Model configuration
         self.base_model_name = base_model or self.config.get('base_model')
@@ -160,6 +176,15 @@ class PPOTrainer:
                 self.model = base_model
                 logger.success("PEFT model initialized (no value head)")
 
+            # Wrap with DistributedDataParallel if distributed training enabled
+            if self.use_distributed and is_distributed():
+                logger.info("Wrapping model with DistributedDataParallel")
+                self.model = wrap_model_ddp(
+                    self.model,
+                    find_unused_parameters=self.advanced_config.get('find_unused_parameters', False),
+                )
+                logger.success("Model wrapped with DDP")
+
         except Exception as e:
             logger.error(f"Failed to initialize PEFT model: {e}")
             logger.warning("Training will proceed in simulation mode without actual model")
@@ -244,6 +269,15 @@ class PPOTrainer:
         max_grad_norm = self.training_config.get('max_grad_norm', 1.0)
         checkpoint_freq = self.training_config.get('checkpoint_freq', 10)
         eval_freq = self.training_config.get('eval_freq', 10)
+        gradient_accumulation_steps = self.training_config.get('gradient_accumulation_steps', 1)
+        use_mixed_precision = self.advanced_config.get('use_mixed_precision', False)
+
+        # Initialize GradScaler for mixed precision training
+        scaler = None
+        if use_mixed_precision and torch.cuda.is_available():
+            from torch.cuda.amp import GradScaler
+            scaler = GradScaler()
+            logger.info("Mixed precision training enabled (FP16)")
 
         # Initialize reward computer
         reward_computer = RewardComputer()
@@ -259,6 +293,9 @@ class PPOTrainer:
         # Create mock training data if none provided
         if training_data is None:
             training_data = self._create_mock_training_data(num_samples=50)
+
+        # Gradient accumulation counter
+        accumulation_counter = 0
 
         # Training loop
         for episode in range(start_episode, num_episodes):
@@ -288,56 +325,117 @@ class PPOTrainer:
             epoch_kl_divs = []
 
             for ppo_epoch in range(ppo_epochs):
-                # Forward pass
-                outputs = self._forward_rollouts(rollouts)
+                # Only zero gradients at the start of accumulation cycle
+                if accumulation_counter % gradient_accumulation_steps == 0:
+                    self.optimizer.zero_grad()
 
-                # Compute new log probs
-                new_log_probs = outputs['log_probs']
-                values = outputs['values']
-                logits = outputs['logits']
+                # Forward pass with mixed precision
+                if scaler is not None:
+                    from torch.cuda.amp import autocast
+                    with autocast():
+                        # Forward pass
+                        outputs = self._forward_rollouts(rollouts)
 
-                # Compute PPO loss
-                policy_loss = compute_ppo_loss(
-                    log_probs=new_log_probs,
-                    old_log_probs=old_log_probs,
-                    advantages=advantages,
-                    clip_range=clip_range,
-                )
+                        # Compute new log probs
+                        new_log_probs = outputs['log_probs']
+                        values = outputs['values']
+                        logits = outputs['logits']
 
-                # Compute value loss
-                value_loss = compute_value_loss(values, returns)
+                        # Compute PPO loss
+                        policy_loss = compute_ppo_loss(
+                            log_probs=new_log_probs,
+                            old_log_probs=old_log_probs,
+                            advantages=advantages,
+                            clip_range=clip_range,
+                        )
 
-                # Compute entropy for exploration
-                from reason_agent.rl.training_utils import compute_entropy
-                entropy = compute_entropy(logits)
+                        # Compute value loss
+                        value_loss = compute_value_loss(values, returns)
 
-                # Total loss
-                loss = (
-                    policy_loss
-                    + value_coef * value_loss
-                    - entropy_coef * entropy
-                )
+                        # Compute entropy for exploration
+                        from reason_agent.rl.training_utils import compute_entropy
+                        entropy = compute_entropy(logits)
 
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
+                        # Total loss
+                        loss = (
+                            policy_loss
+                            + value_coef * value_loss
+                            - entropy_coef * entropy
+                        )
 
-                # Clip gradients
-                grad_norm = clip_gradients(self.model, max_grad_norm)
+                        # Normalize loss by accumulation steps
+                        loss = loss / gradient_accumulation_steps
 
-                # Optimizer step
-                self.optimizer.step()
+                    # Backward pass with scaled gradients
+                    scaler.scale(loss).backward()
+                else:
+                    # Forward pass (no mixed precision)
+                    outputs = self._forward_rollouts(rollouts)
 
-                # Scheduler step
-                if self.scheduler is not None:
-                    self.scheduler.step()
+                    # Compute new log probs
+                    new_log_probs = outputs['log_probs']
+                    values = outputs['values']
+                    logits = outputs['logits']
+
+                    # Compute PPO loss
+                    policy_loss = compute_ppo_loss(
+                        log_probs=new_log_probs,
+                        old_log_probs=old_log_probs,
+                        advantages=advantages,
+                        clip_range=clip_range,
+                    )
+
+                    # Compute value loss
+                    value_loss = compute_value_loss(values, returns)
+
+                    # Compute entropy for exploration
+                    from reason_agent.rl.training_utils import compute_entropy
+                    entropy = compute_entropy(logits)
+
+                    # Total loss
+                    loss = (
+                        policy_loss
+                        + value_coef * value_loss
+                        - entropy_coef * entropy
+                    )
+
+                    # Normalize loss by accumulation steps
+                    loss = loss / gradient_accumulation_steps
+
+                    # Backward pass (standard)
+                    loss.backward()
+
+                # Increment accumulation counter
+                accumulation_counter += 1
+
+                # Only update weights after accumulating gradients
+                if accumulation_counter % gradient_accumulation_steps == 0:
+                    if scaler is not None:
+                        # Unscale gradients and clip
+                        scaler.unscale_(self.optimizer)
+                        grad_norm = clip_gradients(self.model, max_grad_norm)
+
+                        # Optimizer step with scaler
+                        scaler.step(self.optimizer)
+                        scaler.update()
+                    else:
+                        # Clip gradients
+                        grad_norm = clip_gradients(self.model, max_grad_norm)
+
+                        # Optimizer step
+                        self.optimizer.step()
+
+                    # Scheduler step (only when we actually update)
+                    if self.scheduler is not None:
+                        self.scheduler.step()
 
                 # Compute KL for monitoring
                 with torch.no_grad():
                     kl = torch.abs(new_log_probs - old_log_probs).mean()
 
-                epoch_policy_losses.append(policy_loss.item())
-                epoch_value_losses.append(value_loss.item())
+                # Store metrics (denormalize loss for logging)
+                epoch_policy_losses.append(policy_loss.item() * gradient_accumulation_steps)
+                epoch_value_losses.append(value_loss.item() * gradient_accumulation_steps)
                 epoch_kl_divs.append(kl.item())
 
             # Compute episode rewards
