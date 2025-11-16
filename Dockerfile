@@ -52,10 +52,12 @@ RUN mkdir -p \
     artifacts/faiss \
     artifacts/models \
     artifacts/runs \
+    models \
     logs && \
     chown -R appuser:appuser \
     data \
     artifacts \
+    models \
     logs
 
 # Make CLI scripts and shell scripts executable
@@ -63,6 +65,9 @@ RUN chmod +x reason_agent/cli/*.py && \
     chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 
 USER appuser
+
+# Download model during build (cached for faster subsequent builds)
+RUN python3 scripts/download_model.py || echo "Model download will be attempted at runtime"
 
 # Expose ports
 EXPOSE 8000 8501
