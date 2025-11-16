@@ -34,6 +34,10 @@ from reason_agent.rl.training_utils import (
     RewardComputer,
 )
 from reason_agent.rl.data_collators import PPODataCollator
+from reason_agent.rl.value_head import ModelWithValueHead
+from reason_agent.rl.schedulers import get_scheduler
+from reason_agent.rl.checkpointing import TrainingCheckpointer
+from reason_agent.rl.evaluator import ModelEvaluator
 
 
 class PPOTrainer:
@@ -44,6 +48,8 @@ class PPOTrainer:
         config_path: Optional[Path] = None,
         base_model: Optional[str] = None,
         initialize_model: bool = False,
+        checkpoint_dir: Optional[Path] = None,
+        use_value_head: bool = True,
     ):
         """
         Initialize PPO trainer.
@@ -52,6 +58,8 @@ class PPOTrainer:
             config_path: Path to ppo.yaml config
             base_model: Base model name/path (if None, use from config)
             initialize_model: Whether to initialize the PEFT model immediately
+            checkpoint_dir: Directory for checkpoints (default: artifacts/checkpoints/ppo)
+            use_value_head: Whether to use actual value head (vs mock values)
         """
         if config_path is None:
             config_path = Path("configs/rl/ppo.yaml")
@@ -67,11 +75,13 @@ class PPOTrainer:
         self.base_model_name = base_model or self.config.get('base_model')
         self.model = None
         self.tokenizer = None
+        self.use_value_head = use_value_head
 
         logger.info("PPO trainer initialized")
         logger.info(f"Learning rate: {self.training_config.get('learning_rate')}")
         logger.info(f"PPO epochs: {self.training_config.get('ppo_epochs')}")
         logger.info(f"PEFT method: {self.peft_config.get('method', 'lora')}")
+        logger.info(f"Value head: {'enabled' if use_value_head else 'disabled (mock values)'}")
 
         # Initialize model if requested and base model is specified
         if initialize_model and self.base_model_name:
@@ -85,8 +95,42 @@ class PPOTrainer:
                 lr=self.training_config.get('learning_rate', 1e-5),
             )
 
+        # Initialize scheduler (if optimizer exists)
+        self.scheduler = None
+        if self.optimizer is not None:
+            scheduler_config = self.training_config.get('scheduler', {})
+            scheduler_name = scheduler_config.get('name', 'cosine')
+            warmup_steps = scheduler_config.get('warmup_steps', 100)
+            total_steps = scheduler_config.get('total_steps', 1000)
+
+            self.scheduler = get_scheduler(
+                name=scheduler_name,
+                optimizer=self.optimizer,
+                warmup_steps=warmup_steps,
+                total_steps=total_steps,
+            )
+            logger.info(f"Initialized {scheduler_name} scheduler with {warmup_steps} warmup steps")
+
+        # Initialize checkpointer
+        if checkpoint_dir is None:
+            checkpoint_dir = Path("artifacts/checkpoints/ppo")
+        self.checkpointer = TrainingCheckpointer(
+            checkpoint_dir=checkpoint_dir,
+            keep_last_n=self.training_config.get('keep_last_n_checkpoints', 3),
+            save_best=True,
+        )
+
+        # Initialize evaluator (if model exists)
+        self.evaluator = None
+        if self.model is not None and self.tokenizer is not None:
+            self.evaluator = ModelEvaluator(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                batch_size=self.training_config.get('eval_batch_size', 4),
+            )
+
     def _initialize_model(self) -> None:
-        """Initialize PEFT model with LoRA adapters."""
+        """Initialize PEFT model with LoRA adapters and optional value head."""
         if not self.base_model_name:
             logger.warning("No base model specified, skipping model initialization")
             return
@@ -94,13 +138,28 @@ class PPOTrainer:
         logger.info(f"Initializing PEFT model from {self.base_model_name}")
 
         try:
-            self.model, self.tokenizer = initialize_peft_model(
+            base_model, self.tokenizer = initialize_peft_model(
                 base_model_name=self.base_model_name,
                 peft_config=self.peft_config,
                 device=None,  # Auto-detect
                 load_in_8bit=self.training_config.get('load_in_8bit', False),
             )
-            logger.success("PEFT model initialized successfully")
+
+            # Wrap with value head if enabled
+            if self.use_value_head:
+                logger.info("Wrapping model with value head")
+                hidden_size = base_model.config.hidden_size
+                self.model = ModelWithValueHead(
+                    model=base_model,
+                    hidden_size=hidden_size,
+                    value_head_dropout=self.training_config.get('value_head_dropout', 0.1),
+                    value_head_layers=self.training_config.get('value_head_layers', 2),
+                )
+                logger.success("Model with value head initialized")
+            else:
+                self.model = base_model
+                logger.success("PEFT model initialized (no value head)")
+
         except Exception as e:
             logger.error(f"Failed to initialize PEFT model: {e}")
             logger.warning("Training will proceed in simulation mode without actual model")
@@ -113,6 +172,8 @@ class PPOTrainer:
         save_path: Optional[Path] = None,
         use_actual_training: bool = True,
         training_data: Optional[list] = None,
+        val_data: Optional[list] = None,
+        resume_from_checkpoint: bool = True,
     ) -> Dict[str, Any]:
         """
         Train PPO on verifiable math tasks.
@@ -122,16 +183,30 @@ class PPOTrainer:
             save_path: Path to save trained adapter
             use_actual_training: If True and model is initialized, use actual training
             training_data: Optional training data (list of dicts with query/response/reward)
+            val_data: Optional validation data for evaluation
+            resume_from_checkpoint: Whether to resume from latest checkpoint if available
 
         Returns:
             Training metrics
         """
         logger.info(f"Starting PPO training for {num_episodes} episodes...")
 
+        # Try to resume from checkpoint
+        start_episode = 0
+        if resume_from_checkpoint and self.model is not None:
+            checkpoint = self.checkpointer.resume_from_latest(
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+            )
+            if checkpoint is not None:
+                start_episode = checkpoint.get('epoch', 0) + 1
+                logger.info(f"Resumed from episode {start_episode}")
+
         # Choose training mode
         if use_actual_training and self.model is not None and self.optimizer is not None:
             logger.info("Using ACTUAL PPO training with model updates")
-            return self._train_actual(num_episodes, save_path, training_data)
+            return self._train_actual(num_episodes, save_path, training_data, val_data, start_episode)
         else:
             logger.warning("Using SIMULATION mode (no model updates)")
             return self._train_simulation(num_episodes, save_path)
@@ -141,6 +216,8 @@ class PPOTrainer:
         num_episodes: int,
         save_path: Optional[Path],
         training_data: Optional[list] = None,
+        val_data: Optional[list] = None,
+        start_episode: int = 0,
     ) -> Dict[str, Any]:
         """
         Actual PPO training with real model updates.
@@ -149,6 +226,8 @@ class PPOTrainer:
             num_episodes: Number of training episodes
             save_path: Path to save adapter
             training_data: Training data (queries and expected outputs)
+            val_data: Validation data for evaluation
+            start_episode: Episode to start from (for resuming)
 
         Returns:
             Training metrics
@@ -163,6 +242,8 @@ class PPOTrainer:
         gamma = self.reward_config.get('gamma', 0.99)
         gae_lambda = self.reward_config.get('gae_lambda', 0.95)
         max_grad_norm = self.training_config.get('max_grad_norm', 1.0)
+        checkpoint_freq = self.training_config.get('checkpoint_freq', 10)
+        eval_freq = self.training_config.get('eval_freq', 10)
 
         # Initialize reward computer
         reward_computer = RewardComputer()
@@ -172,13 +253,15 @@ class PPOTrainer:
         policy_losses = []
         value_losses = []
         kl_divs = []
+        val_accuracies = []
+        best_val_accuracy = 0.0
 
         # Create mock training data if none provided
         if training_data is None:
             training_data = self._create_mock_training_data(num_samples=50)
 
         # Training loop
-        for episode in range(num_episodes):
+        for episode in range(start_episode, num_episodes):
             # Sample a batch from training data
             batch_size = min(4, len(training_data))
             batch_indices = np.random.choice(len(training_data), batch_size, replace=False)
@@ -245,6 +328,10 @@ class PPOTrainer:
                 # Optimizer step
                 self.optimizer.step()
 
+                # Scheduler step
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
                 # Compute KL for monitoring
                 with torch.no_grad():
                     kl = torch.abs(new_log_probs - old_log_probs).mean()
@@ -263,13 +350,55 @@ class PPOTrainer:
             value_losses.append(np.mean(epoch_value_losses))
             kl_divs.append(np.mean(epoch_kl_divs))
 
+            # Run validation
+            if val_data is not None and self.evaluator is not None and (episode + 1) % eval_freq == 0:
+                logger.info("Running validation...")
+                val_metrics = self.evaluator.evaluate_with_generation(
+                    eval_data=val_data,
+                    show_progress=False,
+                )
+                val_accuracy = val_metrics['accuracy']
+                val_accuracies.append(val_accuracy)
+                logger.info(f"Validation accuracy: {val_accuracy:.3f}")
+
+                # Check if best model
+                is_best = val_accuracy > best_val_accuracy
+                if is_best:
+                    best_val_accuracy = val_accuracy
+                    logger.success(f"New best validation accuracy: {val_accuracy:.3f}")
+            else:
+                is_best = False
+
+            # Save checkpoint
+            if (episode + 1) % checkpoint_freq == 0:
+                logger.info(f"Saving checkpoint at episode {episode + 1}")
+                checkpoint_metrics = {
+                    'mean_reward': mean_reward,
+                    'policy_loss': policy_losses[-1],
+                    'value_loss': value_losses[-1],
+                    'kl_divergence': kl_divs[-1],
+                }
+                if val_accuracies:
+                    checkpoint_metrics['val_accuracy'] = val_accuracies[-1]
+
+                self.checkpointer.save_checkpoint(
+                    epoch=episode,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    metrics=checkpoint_metrics,
+                    is_best=is_best,
+                )
+
             if (episode + 1) % 10 == 0:
+                lr = self.optimizer.param_groups[0]['lr']
                 logger.info(
                     f"Episode {episode + 1}/{num_episodes} | "
                     f"Reward: {mean_reward:.3f} | "
                     f"Policy Loss: {policy_losses[-1]:.3f} | "
                     f"Value Loss: {value_losses[-1]:.3f} | "
-                    f"KL: {kl_divs[-1]:.4f}"
+                    f"KL: {kl_divs[-1]:.4f} | "
+                    f"LR: {lr:.2e}"
                 )
 
         return self._save_training_metrics(
@@ -539,9 +668,39 @@ class PPOTrainer:
         # Expand to sequence
         rewards_seq = rewards.unsqueeze(-1).expand(-1, seq_len)
 
-        # Mock value estimates (in real PPO, these come from value head)
-        values = torch.randn(batch_size, seq_len) * 0.1 + rewards.unsqueeze(-1)
-        next_values = torch.roll(values, -1, dims=1)
+        # Get value estimates
+        if self.use_value_head and isinstance(self.model, ModelWithValueHead):
+            # Use actual value head
+            texts = [r['query'] + " " + r['response'] for r in rollouts]
+            inputs = preprocess_batch(texts, self.tokenizer, max_length=512)
+
+            # Move to device
+            device = next(self.model.parameters()).device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            # Forward pass to get values
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                values = outputs['values']  # (batch_size, seq_len)
+
+                # Pad or truncate to seq_len
+                if values.shape[1] < seq_len:
+                    padding = torch.zeros(
+                        batch_size, seq_len - values.shape[1],
+                        device=device
+                    )
+                    values = torch.cat([values, padding], dim=1)
+                else:
+                    values = values[:, :seq_len]
+
+                # Move to CPU for GAE computation
+                values = values.cpu()
+
+            next_values = torch.roll(values, -1, dims=1)
+        else:
+            # Mock value estimates (fallback)
+            values = torch.randn(batch_size, seq_len) * 0.1 + rewards.unsqueeze(-1)
+            next_values = torch.roll(values, -1, dims=1)
 
         # Done flags (episode ends)
         dones = torch.zeros(batch_size, seq_len)
@@ -573,8 +732,17 @@ class PPOTrainer:
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         # Forward pass
-        outputs = self.model(**inputs)
-        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+        if self.use_value_head and isinstance(self.model, ModelWithValueHead):
+            # Use model with value head
+            outputs = self.model(**inputs)
+            logits = outputs['logits']
+            values = outputs['values']
+        else:
+            # Regular model
+            outputs = self.model(**inputs)
+            logits = outputs.logits
+            # Mock value estimates
+            values = torch.randn(batch_size, logits.shape[1], device=device) * 0.1
 
         # Compute log probs (simplified)
         log_probs = F.log_softmax(logits, dim=-1)
@@ -592,8 +760,15 @@ class PPOTrainer:
         else:
             mean_log_probs = mean_log_probs[:, :seq_len]
 
-        # Mock value estimates (in real PPO, this comes from value head)
-        values = torch.randn(batch_size, seq_len, device=device) * 0.1
+        # Pad values to seq_len if needed
+        if values.shape[1] < seq_len:
+            padding = torch.zeros(
+                batch_size, seq_len - values.shape[1],
+                device=device
+            )
+            values = torch.cat([values, padding], dim=1)
+        else:
+            values = values[:, :seq_len]
 
         return {
             'log_probs': mean_log_probs,
