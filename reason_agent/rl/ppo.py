@@ -88,6 +88,31 @@ class PPOTrainer:
             self.distributed_config = setup_distributed()
             logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
+        # Device detection and configuration (CUDA, MPS, or CPU)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            self.use_gpu = True
+            self.backend = "cuda"
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.success(f"🚀 NVIDIA GPU detected: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.info(f"Mixed precision: {'ENABLED (2x faster)' if self.advanced_config.get('use_mixed_precision') else 'disabled'}")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            self.use_gpu = True
+            self.backend = "mps"
+            logger.success(f"🍎 Apple Silicon GPU detected (Metal Performance Shaders)")
+            logger.info("MPS acceleration ENABLED (2-3x faster than CPU on M1/M2/M3)")
+            logger.info("Mixed precision not supported on MPS, using float32")
+        else:
+            self.device = torch.device("cpu")
+            self.use_gpu = False
+            self.backend = "cpu"
+            logger.warning("⚠️  No GPU detected - using CPU")
+            logger.info("For faster training:")
+            logger.info("  - Mac M1/M2/M3: Run natively (not Docker) to use Metal GPU")
+            logger.info("  - Linux/Windows: Install NVIDIA GPU + nvidia-docker")
+
         # Model configuration
         self.base_model_name = base_model or self.model_config.get('base_model')
         self.model = None
@@ -95,7 +120,9 @@ class PPOTrainer:
         self.use_value_head = use_value_head
 
         logger.info("PPO trainer initialized")
+        logger.info(f"Device: {self.device}")
         logger.info(f"Learning rate: {self.training_config.get('learning_rate')}")
+        logger.info(f"Batch size: {self.training_config.get('batch_size')}")
         logger.info(f"PPO epochs: {self.training_config.get('ppo_epochs')}")
         logger.info(f"PEFT method: {self.peft_config.get('method', 'lora')}")
         logger.info(f"Value head: {'enabled' if use_value_head else 'disabled (mock values)'}")

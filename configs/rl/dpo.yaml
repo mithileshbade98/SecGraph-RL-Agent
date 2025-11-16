@@ -20,11 +20,11 @@ model:
 # Training hyperparameters
 training:
   learning_rate: 5.0e-6
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 8  # Increased for GPU - faster throughput
+  gradient_accumulation_steps: 4  # Reduced since batch_size increased
   max_grad_norm: 1.0
   num_train_epochs: 1
-  warmup_steps: 50
+  warmup_steps: 25  # Reduced for faster initial training
 
   # Optimization
   optimizer: adamw
@@ -122,10 +122,10 @@ advanced:
   contrastive_weight: 0.1
 
   # Gradient checkpointing
-  enable_gradient_checkpointing: false
+  enable_gradient_checkpointing: true  # Saves memory for larger batches
 
   # Mixed precision training (FP16 on GPU, 2x faster, 50% less memory)
-  use_mixed_precision: false
+  use_mixed_precision: true  # ENABLED for GPU acceleration
 
   # Distributed training (multi-GPU/multi-node via DDP)
   use_distributed: false

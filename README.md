@@ -54,6 +54,8 @@ Initial build takes 5-10 minutes (includes model download). Subsequent starts co
 
 **Requirements:** Docker Desktop with 4GB RAM allocation
 
+**🍎 Mac M1/M2/M3 Users:** See [MAC_SETUP.md](MAC_SETUP.md) for native setup with Metal GPU acceleration (2-3x faster than Docker)
+
 For detailed Docker configuration, see [DOCKER.md](DOCKER.md).
 
 ### Model Management

@@ -18,12 +18,16 @@ model:
 # Training hyperparameters
 training:
   learning_rate: 1.0e-5
-  batch_size: 4
-  mini_batch_size: 1
-  gradient_accumulation_steps: 8
+  batch_size: 8  # Optimized for GPU/MPS - 4 for CPU in Docker
+  mini_batch_size: 2  # 1 for CPU
+  gradient_accumulation_steps: 4  # Reduced since batch_size increased
   max_grad_norm: 1.0
   num_train_epochs: 3
-  warmup_steps: 100
+  warmup_steps: 50  # Reduced for faster initial training
+
+  # CPU optimization (auto-detected, overrides above if CPU-only)
+  cpu_batch_size: 4  # Smaller batch for CPU
+  cpu_mini_batch_size: 1
 
   # PPO specific
   ppo_epochs: 4
@@ -119,7 +123,7 @@ advanced:
   use_score_scaling: true
   use_score_norm: false
   whiten_rewards: true
-  enable_gradient_checkpointing: false
-  use_mixed_precision: false  # Mixed precision training (FP16 on GPU, 2x faster, 50% less memory)
+  enable_gradient_checkpointing: true  # Saves memory for larger batches
+  use_mixed_precision: true  # FP16 on GPU: 2x faster, 50% less memory
   use_distributed: false  # Distributed training (multi-GPU/multi-node via DDP)
   find_unused_parameters: false  # DDP: Find unused parameters (slower but more robust)
