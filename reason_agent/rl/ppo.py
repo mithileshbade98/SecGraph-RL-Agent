@@ -13,17 +13,32 @@ import random
 import numpy as np
 from datetime import datetime
 from loguru import logger
+import torch
+from reason_agent.rl.lora_utils import (
+    initialize_peft_model,
+    save_lora_adapter,
+    preprocess_text,
+    postprocess_output,
+    generate_with_lora,
+)
 
 
 class PPOTrainer:
     """PPO trainer for reasoning agents."""
 
-    def __init__(self, config_path: Optional[Path] = None):
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        base_model: Optional[str] = None,
+        initialize_model: bool = False,
+    ):
         """
         Initialize PPO trainer.
 
         Args:
             config_path: Path to ppo.yaml config
+            base_model: Base model name/path (if None, use from config)
+            initialize_model: Whether to initialize the PEFT model immediately
         """
         if config_path is None:
             config_path = Path("configs/rl/ppo.yaml")
@@ -33,10 +48,43 @@ class PPOTrainer:
 
         self.training_config = self.config.get('training', {})
         self.reward_config = self.config.get('rewards', {})
+        self.peft_config = self.config.get('peft_config', {})
+
+        # Model configuration
+        self.base_model_name = base_model or self.config.get('base_model')
+        self.model = None
+        self.tokenizer = None
 
         logger.info("PPO trainer initialized")
         logger.info(f"Learning rate: {self.training_config.get('learning_rate')}")
         logger.info(f"PPO epochs: {self.training_config.get('ppo_epochs')}")
+        logger.info(f"PEFT method: {self.peft_config.get('method', 'lora')}")
+
+        # Initialize model if requested and base model is specified
+        if initialize_model and self.base_model_name:
+            self._initialize_model()
+
+    def _initialize_model(self) -> None:
+        """Initialize PEFT model with LoRA adapters."""
+        if not self.base_model_name:
+            logger.warning("No base model specified, skipping model initialization")
+            return
+
+        logger.info(f"Initializing PEFT model from {self.base_model_name}")
+
+        try:
+            self.model, self.tokenizer = initialize_peft_model(
+                base_model_name=self.base_model_name,
+                peft_config=self.peft_config,
+                device=None,  # Auto-detect
+                load_in_8bit=self.training_config.get('load_in_8bit', False),
+            )
+            logger.success("PEFT model initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize PEFT model: {e}")
+            logger.warning("Training will proceed in simulation mode without actual model")
+            self.model = None
+            self.tokenizer = None
 
     def train(
         self,
@@ -135,9 +183,31 @@ class PPOTrainer:
 
         # Save adapter
         if save_path:
+            save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Saving PPO adapter to {save_path}")
-            # In production: save LoRA weights
+
+            # If we have an actual model, save the LoRA adapter
+            if self.model is not None and self.tokenizer is not None:
+                try:
+                    save_lora_adapter(
+                        model=self.model,
+                        save_path=save_path,
+                        tokenizer=self.tokenizer,
+                    )
+                    logger.success(f"LoRA adapter saved to {save_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save LoRA adapter: {e}")
+            else:
+                logger.info(f"Adapter path prepared at {save_path}")
+                logger.warning("No model initialized - adapter not saved (running in simulation mode)")
+
+                # Create placeholder to indicate training completed
+                placeholder_file = save_path / "training_completed.txt"
+                save_path.mkdir(parents=True, exist_ok=True)
+                with open(placeholder_file, 'w') as f:
+                    f.write(f"PPO training completed at {datetime.now().isoformat()}\n")
+                    f.write(f"Final reward: {metrics['final_avg_reward']:.3f}\n")
+                    f.write("Note: Run with actual base model to save LoRA weights\n")
 
         return metrics
 
