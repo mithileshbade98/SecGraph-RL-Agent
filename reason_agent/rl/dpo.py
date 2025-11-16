@@ -82,6 +82,18 @@ class DPOTrainer:
             self.distributed_config = setup_distributed()
             logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
+        # GPU detection and configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_gpu = torch.cuda.is_available()
+        if self.use_gpu:
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.success(f"🚀 GPU detected: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.info(f"Mixed precision: {'ENABLED (2x faster)' if self.advanced_config.get('use_mixed_precision') else 'disabled'}")
+        else:
+            logger.warning("⚠️  No GPU detected - training will be slower on CPU")
+            logger.info("For GPU support, ensure nvidia-docker is installed and configured")
+
         # Model configuration
         self.base_model_name = base_model or self.model_config.get('base_model')
         self.policy_model = None  # Trainable policy model
@@ -89,6 +101,8 @@ class DPOTrainer:
         self.tokenizer = None
 
         logger.info("DPO trainer initialized")
+        logger.info(f"Device: {self.device}")
+        logger.info(f"Batch size: {self.training_config.get('batch_size')}")
         logger.info(f"Beta: {self.dpo_config.get('beta')}")
         logger.info(f"Dynamic beta: {self.dpo_config.get('use_dynamic_beta')}")
         logger.info(f"Use offset: {self.dpo_config.get('use_offset')}")

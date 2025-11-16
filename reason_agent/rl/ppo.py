@@ -88,6 +88,18 @@ class PPOTrainer:
             self.distributed_config = setup_distributed()
             logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
+        # GPU detection and configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_gpu = torch.cuda.is_available()
+        if self.use_gpu:
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.success(f"🚀 GPU detected: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.info(f"Mixed precision: {'ENABLED (2x faster)' if self.advanced_config.get('use_mixed_precision') else 'disabled'}")
+        else:
+            logger.warning("⚠️  No GPU detected - training will be slower on CPU")
+            logger.info("For GPU support, ensure nvidia-docker is installed and configured")
+
         # Model configuration
         self.base_model_name = base_model or self.model_config.get('base_model')
         self.model = None
@@ -95,7 +107,9 @@ class PPOTrainer:
         self.use_value_head = use_value_head
 
         logger.info("PPO trainer initialized")
+        logger.info(f"Device: {self.device}")
         logger.info(f"Learning rate: {self.training_config.get('learning_rate')}")
+        logger.info(f"Batch size: {self.training_config.get('batch_size')}")
         logger.info(f"PPO epochs: {self.training_config.get('ppo_epochs')}")
         logger.info(f"PEFT method: {self.peft_config.get('method', 'lora')}")
         logger.info(f"Value head: {'enabled' if use_value_head else 'disabled (mock values)'}")

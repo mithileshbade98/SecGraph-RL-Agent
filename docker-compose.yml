@@ -62,6 +62,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: secgraph-api
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       neo4j:
         condition: service_healthy
@@ -111,6 +118,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: secgraph-ui
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       neo4j:
         condition: service_healthy
