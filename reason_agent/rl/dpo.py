@@ -29,6 +29,9 @@ from reason_agent.rl.training_utils import (
     clip_gradients,
 )
 from reason_agent.rl.data_collators import DPODataCollator
+from reason_agent.rl.schedulers import get_scheduler
+from reason_agent.rl.checkpointing import TrainingCheckpointer
+from reason_agent.rl.evaluator import ModelEvaluator
 import torch.nn.functional as F
 
 
@@ -40,6 +43,7 @@ class DPOTrainer:
         config_path: Optional[Path] = None,
         base_model: Optional[str] = None,
         initialize_model: bool = False,
+        checkpoint_dir: Optional[Path] = None,
     ):
         """
         Initialize DPO trainer.
@@ -48,6 +52,7 @@ class DPOTrainer:
             config_path: Path to dpo.yaml config
             base_model: Base model name/path (if None, use from config)
             initialize_model: Whether to initialize the PEFT models immediately
+            checkpoint_dir: Directory for checkpoints (default: artifacts/checkpoints/dpo)
         """
         if config_path is None:
             config_path = Path("configs/rl/dpo.yaml")
@@ -82,6 +87,40 @@ class DPOTrainer:
             self.optimizer = torch.optim.AdamW(
                 self.policy_model.parameters(),
                 lr=self.training_config.get('learning_rate', 1e-6),
+            )
+
+        # Initialize scheduler (if optimizer exists)
+        self.scheduler = None
+        if self.optimizer is not None:
+            scheduler_config = self.training_config.get('scheduler', {})
+            scheduler_name = scheduler_config.get('name', 'cosine')
+            warmup_steps = scheduler_config.get('warmup_steps', 100)
+            total_steps = scheduler_config.get('total_steps', 1000)
+
+            self.scheduler = get_scheduler(
+                name=scheduler_name,
+                optimizer=self.optimizer,
+                warmup_steps=warmup_steps,
+                total_steps=total_steps,
+            )
+            logger.info(f"Initialized {scheduler_name} scheduler with {warmup_steps} warmup steps")
+
+        # Initialize checkpointer
+        if checkpoint_dir is None:
+            checkpoint_dir = Path("artifacts/checkpoints/dpo")
+        self.checkpointer = TrainingCheckpointer(
+            checkpoint_dir=checkpoint_dir,
+            keep_last_n=self.training_config.get('keep_last_n_checkpoints', 3),
+            save_best=True,
+        )
+
+        # Initialize evaluator (if model exists)
+        self.evaluator = None
+        if self.policy_model is not None and self.tokenizer is not None:
+            self.evaluator = ModelEvaluator(
+                model=self.policy_model,
+                tokenizer=self.tokenizer,
+                batch_size=self.training_config.get('eval_batch_size', 4),
             )
 
     def _initialize_models(self) -> None:
@@ -161,6 +200,8 @@ class DPOTrainer:
         num_epochs: int = 1,
         save_path: Optional[Path] = None,
         use_actual_training: bool = True,
+        val_data: Optional[list] = None,
+        resume_from_checkpoint: bool = True,
     ) -> Dict[str, Any]:
         """
         Train DPO on preference pairs.
@@ -170,6 +211,8 @@ class DPOTrainer:
             num_epochs: Number of training epochs
             save_path: Path to save trained adapter
             use_actual_training: If True and model initialized, use actual training
+            val_data: Optional validation data for evaluation
+            resume_from_checkpoint: Whether to resume from latest checkpoint if available
 
         Returns:
             Training metrics
@@ -178,6 +221,18 @@ class DPOTrainer:
             data_path = Path(self.data_config.get('train_file', 'data/audits/pairs.jsonl'))
 
         logger.info(f"Starting DPO training for {num_epochs} epochs...")
+
+        # Try to resume from checkpoint
+        start_epoch = 0
+        if resume_from_checkpoint and self.policy_model is not None:
+            checkpoint = self.checkpointer.resume_from_latest(
+                model=self.policy_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+            )
+            if checkpoint is not None:
+                start_epoch = checkpoint.get('epoch', 0) + 1
+                logger.info(f"Resumed from epoch {start_epoch}")
 
         # Load data
         pairs = self.load_preference_pairs(data_path)
@@ -189,7 +244,7 @@ class DPOTrainer:
         # Choose training mode
         if use_actual_training and self.policy_model is not None and self.optimizer is not None:
             logger.info("Using ACTUAL DPO training with model updates")
-            return self._train_actual(pairs, num_epochs, save_path)
+            return self._train_actual(pairs, num_epochs, save_path, val_data, start_epoch)
         else:
             logger.warning("Using SIMULATION mode (no model updates)")
             return self._train_simulation(pairs, num_epochs, save_path)
@@ -199,6 +254,8 @@ class DPOTrainer:
         pairs: List[Dict[str, Any]],
         num_epochs: int,
         save_path: Optional[Path],
+        val_data: Optional[list] = None,
+        start_epoch: int = 0,
     ) -> Dict[str, Any]:
         """
         Actual DPO training with real model updates.
@@ -207,6 +264,8 @@ class DPOTrainer:
             pairs: Preference pairs
             num_epochs: Number of epochs
             save_path: Save path
+            val_data: Validation data for evaluation
+            start_epoch: Epoch to start from (for resuming)
 
         Returns:
             Training metrics
@@ -219,6 +278,8 @@ class DPOTrainer:
         offset_margin = self.dpo_config.get('offset_margin', 0.0)
         max_grad_norm = self.training_config.get('max_grad_norm', 1.0)
         batch_size = min(4, len(pairs))
+        checkpoint_freq = self.training_config.get('checkpoint_freq', 10)
+        eval_freq = self.training_config.get('eval_freq', 10)
 
         # Initialize data collator
         collator = DPODataCollator(
@@ -232,9 +293,11 @@ class DPOTrainer:
         preference_margins = []
         chosen_rewards = []
         rejected_rewards = []
+        val_accuracies = []
+        best_val_accuracy = 0.0
 
         # Training loop
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             # Sample batch
             batch_indices = np.random.choice(len(pairs), min(batch_size, len(pairs)), replace=False)
             batch = [pairs[i] for i in batch_indices]
@@ -312,6 +375,10 @@ class DPOTrainer:
             # Optimizer step
             self.optimizer.step()
 
+            # Scheduler step
+            if self.scheduler is not None:
+                self.scheduler.step()
+
             # Store metrics
             accuracies.append(metrics['accuracy'].item())
             dpo_losses.append(loss.item())
@@ -319,12 +386,53 @@ class DPOTrainer:
             chosen_rewards.append(metrics['chosen_reward'].item())
             rejected_rewards.append(metrics['rejected_reward'].item())
 
+            # Run validation
+            if val_data is not None and self.evaluator is not None and (epoch + 1) % eval_freq == 0:
+                logger.info("Running validation...")
+                val_metrics = self.evaluator.evaluate_with_generation(
+                    eval_data=val_data,
+                    show_progress=False,
+                )
+                val_accuracy = val_metrics['accuracy']
+                val_accuracies.append(val_accuracy)
+                logger.info(f"Validation accuracy: {val_accuracy:.3f}")
+
+                # Check if best model
+                is_best = val_accuracy > best_val_accuracy
+                if is_best:
+                    best_val_accuracy = val_accuracy
+                    logger.success(f"New best validation accuracy: {val_accuracy:.3f}")
+            else:
+                is_best = False
+
+            # Save checkpoint
+            if (epoch + 1) % checkpoint_freq == 0:
+                logger.info(f"Saving checkpoint at epoch {epoch + 1}")
+                checkpoint_metrics = {
+                    'accuracy': accuracies[-1],
+                    'dpo_loss': dpo_losses[-1],
+                    'preference_margin': preference_margins[-1],
+                }
+                if val_accuracies:
+                    checkpoint_metrics['val_accuracy'] = val_accuracies[-1]
+
+                self.checkpointer.save_checkpoint(
+                    epoch=epoch,
+                    model=self.policy_model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    metrics=checkpoint_metrics,
+                    is_best=is_best,
+                )
+
             if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
+                lr = self.optimizer.param_groups[0]['lr']
                 logger.info(
                     f"Epoch {epoch + 1}/{num_epochs} | "
                     f"Loss: {loss.item():.4f} | "
                     f"Acc: {metrics['accuracy'].item():.3f} | "
-                    f"Margin: {metrics['margin'].item():.3f}"
+                    f"Margin: {metrics['margin'].item():.3f} | "
+                    f"LR: {lr:.2e}"
                 )
 
         return self._save_training_metrics(
