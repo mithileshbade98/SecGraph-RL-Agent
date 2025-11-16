@@ -88,17 +88,30 @@ class PPOTrainer:
             self.distributed_config = setup_distributed()
             logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
-        # GPU detection and configuration
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.use_gpu = torch.cuda.is_available()
-        if self.use_gpu:
+        # Device detection and configuration (CUDA, MPS, or CPU)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            self.use_gpu = True
+            self.backend = "cuda"
             gpu_name = torch.cuda.get_device_name(0)
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            logger.success(f"🚀 GPU detected: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.success(f"🚀 NVIDIA GPU detected: {gpu_name} ({gpu_memory:.1f}GB)")
             logger.info(f"Mixed precision: {'ENABLED (2x faster)' if self.advanced_config.get('use_mixed_precision') else 'disabled'}")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            self.use_gpu = True
+            self.backend = "mps"
+            logger.success(f"🍎 Apple Silicon GPU detected (Metal Performance Shaders)")
+            logger.info("MPS acceleration ENABLED (2-3x faster than CPU on M1/M2/M3)")
+            logger.info("Mixed precision not supported on MPS, using float32")
         else:
-            logger.warning("⚠️  No GPU detected - training will be slower on CPU")
-            logger.info("For GPU support, ensure nvidia-docker is installed and configured")
+            self.device = torch.device("cpu")
+            self.use_gpu = False
+            self.backend = "cpu"
+            logger.warning("⚠️  No GPU detected - using CPU")
+            logger.info("For faster training:")
+            logger.info("  - Mac M1/M2/M3: Run natively (not Docker) to use Metal GPU")
+            logger.info("  - Linux/Windows: Install NVIDIA GPU + nvidia-docker")
 
         # Model configuration
         self.base_model_name = base_model or self.model_config.get('base_model')

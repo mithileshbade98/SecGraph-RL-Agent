@@ -18,12 +18,16 @@ model:
 # Training hyperparameters
 training:
   learning_rate: 1.0e-5
-  batch_size: 8  # Increased for GPU - faster throughput
-  mini_batch_size: 2  # Increased for GPU
+  batch_size: 8  # Optimized for GPU/MPS - 4 for CPU in Docker
+  mini_batch_size: 2  # 1 for CPU
   gradient_accumulation_steps: 4  # Reduced since batch_size increased
   max_grad_norm: 1.0
   num_train_epochs: 3
   warmup_steps: 50  # Reduced for faster initial training
+
+  # CPU optimization (auto-detected, overrides above if CPU-only)
+  cpu_batch_size: 4  # Smaller batch for CPU
+  cpu_mini_batch_size: 1
 
   # PPO specific
   ppo_epochs: 4
