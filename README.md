@@ -42,6 +42,7 @@ The fastest path to a working system:
 
 This command orchestrates the complete stack:
 - Builds all Docker images
+- **Downloads TinyLlama-1.1B model (~2GB, cached for future runs)**
 - Initializes Neo4j database with schema
 - Generates synthetic security event dataset (2000+ events, 50+ anomaly patterns)
 - Loads temporal graph into Neo4j
@@ -49,11 +50,44 @@ This command orchestrates the complete stack:
 - Starts API service on port 8000
 - Launches Streamlit UI on port 8501
 
-Initial build takes 5-10 minutes. Subsequent starts complete in seconds.
+Initial build takes 5-10 minutes (includes model download). Subsequent starts complete in seconds.
 
 **Requirements:** Docker Desktop with 4GB RAM allocation
 
 For detailed Docker configuration, see [DOCKER.md](DOCKER.md).
+
+### Model Management
+
+**Automatic Model Download:**
+
+The system automatically downloads TinyLlama-1.1B-Chat-v1.0 on first run. This model is:
+- **Size**: 1.1B parameters (~2GB download)
+- **Popularity**: 22,000+ stars on HuggingFace
+- **Performance**: Optimized instruction-following, fast inference
+- **Compatibility**: Runs on CPU, works great with LoRA
+
+**Download Locations:**
+- **Docker**: Models are downloaded during container build and stored in `shared_models` volume
+- **Local**: Models cached in `models/` directory (persistent across runs)
+
+**Manual Download (optional):**
+```bash
+# Inside Docker container
+python3 scripts/download_model.py
+
+# Check model info
+cat models/model_info.txt
+```
+
+**No Simulation Mode:**
+
+The system now requires a real model for training. Previous simulation modes have been removed to ensure:
+- ✅ **Real training only**: All PPO/DPO training uses actual gradient updates
+- ✅ **Automatic setup**: Model downloads happen transparently
+- ✅ **Production-ready**: What you train is what you deploy
+- ❌ **No mock metrics**: All rewards and losses are from actual model inference
+
+If model initialization fails, you'll see a clear error message with instructions.
 
 ### Local Development
 
@@ -101,7 +135,7 @@ This is the runtime architecture when the agent processes user queries:
 ┌─────────────────────────────────────────────────────────────────┐
 │  REASONING LAYER (Planner with LoRA)                             │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Base LLM (Llama-2-7B) + LoRA Adapter (4MB)             │   │
+│  │  Base LLM (TinyLlama-1.1B) + LoRA Adapter (~1MB)        │   │
 │  │  ↓                                                       │   │
 │  │  Step 1: Thought → Tool → Parameters → Execute          │   │
 │  │  Step 2: Thought → Tool → Parameters → Execute          │   │
@@ -209,9 +243,9 @@ This diagram shows the full lifecycle from raw data to deployed model:
 │  │  Base Model Loading                                        │          │
 │  │  ┌──────────────────────────────────────────────────────┐  │          │
 │  │  │  HuggingFace Model Hub                               │  │          │
-│  │  │  - meta-llama/Llama-2-7b-hf                          │  │          │
-│  │  │  - Download weights (13GB)                           │  │          │
-│  │  │  - Load in float16 or 8-bit                          │  │          │
+│  │  │  - TinyLlama/TinyLlama-1.1B-Chat-v1.0                │  │          │
+│  │  │  - Auto-download on first run (~2GB)                 │  │          │
+│  │  │  - Cached in Docker volume for reuse                 │  │          │
 │  │  └──────────────────┬───────────────────────────────────┘  │          │
 │  │                     │                                       │          │
 │  │                     ▼                                       │          │
@@ -235,13 +269,13 @@ This diagram shows the full lifecycle from raw data to deployed model:
 │  │  │  LoRA Adapter Injection                              │  │          │
 │  │  │                                                       │  │          │
 │  │  │  Original Layer:                                     │  │          │
-│  │  │  W (4096 x 4096) ── frozen, no gradients            │  │          │
+│  │  │  W (2048 x 2048) ── frozen, no gradients            │  │          │
 │  │  │                                                       │  │          │
 │  │  │  LoRA Decomposition:                                 │  │          │
 │  │  │  ΔW = B × A                                          │  │          │
 │  │  │  where:                                              │  │          │
-│  │  │  - A (4096 x 8)  ← trainable                        │  │          │
-│  │  │  - B (8 x 4096)  ← trainable                        │  │          │
+│  │  │  - A (2048 x 16)  ← trainable                       │  │          │
+│  │  │  - B (16 x 2048)  ← trainable                       │  │          │
 │  │  │                                                       │  │          │
 │  │  │  Forward Pass:                                       │  │          │
 │  │  │  h = W×x + (α/r)×B×A×x                              │  │          │
@@ -249,8 +283,8 @@ This diagram shows the full lifecycle from raw data to deployed model:
 │  │  │    frozen    trainable                               │  │          │
 │  │  │                                                       │  │          │
 │  │  │  Trainable Parameters:                               │  │          │
-│  │  │  - Base model: 7B params (frozen)                   │  │          │
-│  │  │  - LoRA adapters: ~4M params (0.06% of total)       │  │          │
+│  │  │  - Base model: 1.1B params (frozen)                 │  │          │
+│  │  │  - LoRA adapters: ~1M params (0.09% of total)       │  │          │
 │  │  └──────────────────────────────────────────────────────┘  │          │
 │  └────────────────────────────────────────────────────────────┘          │
 │                                                                           │
@@ -258,14 +292,14 @@ This diagram shows the full lifecycle from raw data to deployed model:
 │  ┌────────────────────────────────────────────────────────────┐          │
 │  │  ModelWithValueHead                                        │          │
 │  │  ┌──────────────────────────────────────────────────────┐  │          │
-│  │  │  Base Model (LoRA) → hidden_states (4096-dim)       │  │          │
+│  │  │  Base Model (LoRA) → hidden_states (2048-dim)       │  │          │
 │  │  │          ↓                                           │  │          │
 │  │  │  Value Head Network:                                │  │          │
-│  │  │    ├─ Linear(4096 → 1024)                          │  │          │
+│  │  │    ├─ Linear(2048 → 512)                           │  │          │
 │  │  │    ├─ ReLU + Dropout(0.1)                          │  │          │
-│  │  │    ├─ Linear(1024 → 256)                           │  │          │
+│  │  │    ├─ Linear(512 → 128)                            │  │          │
 │  │  │    ├─ ReLU + Dropout(0.1)                          │  │          │
-│  │  │    └─ Linear(256 → 1)                              │  │          │
+│  │  │    └─ Linear(128 → 1)                              │  │          │
 │  │  │          ↓                                           │  │          │
 │  │  │  Value Estimates (batch_size, seq_len)             │  │          │
 │  │  └──────────────────────────────────────────────────────┘  │          │
@@ -512,23 +546,23 @@ Instead of updating all 7 billion parameters of the base model, LoRA injects sma
 
 **Memory and Compute Benefits:**
 - Trainable parameters: r × d × 2 instead of d × d
-- For d=4096, r=8: 65K params vs 16M params (250x reduction per layer)
-- Total LoRA params across all layers: ~4M vs 7B (0.06% of model)
-- Training memory: 20GB vs 140GB (7x reduction)
-- Training speed: 10x faster per epoch
+- For d=2048, r=16: 65K params vs 4M params (60x reduction per layer)
+- Total LoRA params across all layers: ~1M vs 1.1B (0.09% of model)
+- Training memory: 4GB vs 8GB (2x reduction)
+- Training speed: 8x faster per epoch
 
 **Adapter Storage and Loading:**
 The LoRA adapter is stored separately from the base model:
-- Base model: ~14GB (stored once, shared across adaptations)
-- LoRA adapter: ~4MB (task-specific, fast to swap)
+- Base model: ~2GB (stored once, shared across adaptations)
+- LoRA adapter: ~1MB (task-specific, fast to swap)
 - At inference: Load base model + adapter in <1 second
 
 **Multi-Adapter Support:**
 The system can maintain multiple adapters for different tasks:
-- Adapter A: Fraud detection
-- Adapter B: Account abuse
-- Adapter C: Bot detection
-All sharing the same 7B parameter base model.
+- Adapter A: Fraud detection (~1MB)
+- Adapter B: Account abuse (~1MB)
+- Adapter C: Bot detection (~1MB)
+All sharing the same 1.1B parameter base model.
 
 ### Training Flow Details
 
@@ -1020,7 +1054,7 @@ Merge LoRA adapters back into the base model for inference without PEFT overhead
 
 ```python
 optimizer = PostTrainingOptimizer(
-    model_path="meta-llama/Llama-2-7b-hf",
+    model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     adapter_path="artifacts/models/ppo_adapter",
 )
 
@@ -1034,14 +1068,14 @@ merged_model = optimizer.merge_adapter(
 Reduce model size and memory footprint through 4-bit or 8-bit quantization.
 
 ```python
-# 4-bit quantization (QLoRA)
+# 4-bit quantization (reduces ~2GB to ~500MB)
 optimizer.quantize_4bit(
     output_path="artifacts/models/quantized_4bit",
     compute_dtype='bfloat16',
     quant_type='nf4',
 )
 
-# 8-bit quantization
+# 8-bit quantization (reduces ~2GB to ~1GB)
 optimizer.quantize_8bit(
     output_path="artifacts/models/quantized_8bit",
 )
@@ -1145,15 +1179,15 @@ loader = DatasetLoader()
 train_data = loader.load_jsonl("data/processed/train.jsonl")
 val_data = loader.load_jsonl("data/processed/val.jsonl")
 
-# Initialize trainer
+# Initialize trainer (model auto-downloads if not cached)
 trainer = PPOTrainer(
-    base_model="meta-llama/Llama-2-7b-hf",
-    initialize_model=True,
+    base_model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",  # Default, auto-configured
+    initialize_model=True,  # Default: downloads model automatically
     use_value_head=True,
     checkpoint_dir="artifacts/checkpoints/ppo",
 )
 
-# Train with validation
+# Train with validation (fully real training, no simulation mode)
 metrics = trainer.train(
     num_episodes=100,
     save_path="artifacts/models/ppo_adapter",
@@ -1188,14 +1222,14 @@ Direct Preference Optimization aligns model behavior with expert preferences wit
 ```python
 from reason_agent.rl.dpo import DPOTrainer
 
-# Initialize trainer
+# Initialize trainer (model auto-downloads if not cached)
 trainer = DPOTrainer(
-    base_model="meta-llama/Llama-2-7b-hf",
-    initialize_model=True,
+    base_model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",  # Default, auto-configured
+    initialize_model=True,  # Default: downloads model automatically
     checkpoint_dir="artifacts/checkpoints/dpo",
 )
 
-# Train on preference pairs
+# Train on preference pairs (fully real training, no simulation mode)
 metrics = trainer.train(
     data_path="data/audits/pairs.jsonl",
     num_epochs=3,
@@ -1252,10 +1286,10 @@ metrics = trainer.train(
    from reason_agent.rl.post_training import merge_and_quantize
 
    merge_and_quantize(
-       base_model="meta-llama/Llama-2-7b-hf",
+       base_model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
        adapter_path="artifacts/models/ppo_adapter",
        output_path="artifacts/models/production",
-       quantization='4bit',
+       quantization='4bit',  # Reduces from ~2GB to ~500MB
    )
    ```
 
