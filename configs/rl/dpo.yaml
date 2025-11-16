@@ -124,8 +124,12 @@ advanced:
   # Gradient checkpointing
   enable_gradient_checkpointing: false
 
-  # Mixed precision
-  fp16: false
+  # Mixed precision training (FP16 on GPU, 2x faster, 50% less memory)
+  use_mixed_precision: false
+
+  # Distributed training (multi-GPU/multi-node via DDP)
+  use_distributed: false
+  find_unused_parameters: false  # DDP: Find unused parameters (slower but more robust)
 
   # Sync reference model periodically
   sync_ref_model: false

@@ -32,6 +32,14 @@ from reason_agent.rl.data_collators import DPODataCollator
 from reason_agent.rl.schedulers import get_scheduler
 from reason_agent.rl.checkpointing import TrainingCheckpointer
 from reason_agent.rl.evaluator import ModelEvaluator
+from reason_agent.rl.distributed import (
+    setup_distributed,
+    is_distributed,
+    is_main_process,
+    wrap_model_ddp,
+    DistributedMetrics,
+    DistributedConfig,
+)
 import torch.nn.functional as F
 
 
@@ -64,6 +72,14 @@ class DPOTrainer:
         self.dpo_config = self.config.get('dpo', {})
         self.data_config = self.config.get('data', {})
         self.peft_config = self.config.get('peft_config', {})
+        self.advanced_config = self.config.get('advanced', {})
+
+        # Distributed training setup
+        self.use_distributed = self.advanced_config.get('use_distributed', False)
+        self.distributed_config = None
+        if self.use_distributed:
+            self.distributed_config = setup_distributed()
+            logger.info(f"Distributed training enabled: rank {self.distributed_config.rank}/{self.distributed_config.world_size}")
 
         # Model configuration
         self.base_model_name = base_model or self.config.get('base_model')
@@ -164,6 +180,16 @@ class DPOTrainer:
                 # Reference will be the base model without LoRA adapters
                 # For DPO, we typically use the pre-trained base without adapters as reference
                 self.reference_model = None  # Will be handled during training
+
+            # Wrap policy model with DistributedDataParallel if distributed training enabled
+            # Note: Reference model stays non-DDP as it's frozen
+            if self.use_distributed and is_distributed():
+                logger.info("Wrapping policy model with DistributedDataParallel")
+                self.policy_model = wrap_model_ddp(
+                    self.policy_model,
+                    find_unused_parameters=self.advanced_config.get('find_unused_parameters', False),
+                )
+                logger.success("Policy model wrapped with DDP")
 
             logger.success("DPO models initialized successfully")
 
@@ -280,6 +306,15 @@ class DPOTrainer:
         batch_size = min(4, len(pairs))
         checkpoint_freq = self.training_config.get('checkpoint_freq', 10)
         eval_freq = self.training_config.get('eval_freq', 10)
+        gradient_accumulation_steps = self.training_config.get('gradient_accumulation_steps', 1)
+        use_mixed_precision = self.advanced_config.get('use_mixed_precision', False)
+
+        # Initialize GradScaler for mixed precision training
+        scaler = None
+        if use_mixed_precision and torch.cuda.is_available():
+            from torch.cuda.amp import GradScaler
+            scaler = GradScaler()
+            logger.info("Mixed precision training enabled (FP16)")
 
         # Initialize data collator
         collator = DPODataCollator(
@@ -295,6 +330,9 @@ class DPOTrainer:
         rejected_rewards = []
         val_accuracies = []
         best_val_accuracy = 0.0
+
+        # Gradient accumulation counter
+        accumulation_counter = 0
 
         # Training loop
         for epoch in range(start_epoch, num_epochs):
@@ -316,72 +354,151 @@ class DPOTrainer:
                 'attention_mask': dpo_batch.rejected_attention_mask.to(device),
             }
 
-            # Forward pass - policy model
-            policy_chosen_outputs = self.policy_model(**chosen_inputs)
-            policy_rejected_outputs = self.policy_model(**rejected_inputs)
+            # Only zero gradients at the start of accumulation cycle
+            if accumulation_counter % gradient_accumulation_steps == 0:
+                self.optimizer.zero_grad()
 
-            # Compute log probs for policy
-            policy_chosen_log_probs = compute_log_probs(
-                policy_chosen_outputs.logits,
-                dpo_batch.chosen_labels.to(device),
-                dpo_batch.chosen_attention_mask.to(device),
-            )
-            policy_rejected_log_probs = compute_log_probs(
-                policy_rejected_outputs.logits,
-                dpo_batch.rejected_labels.to(device),
-                dpo_batch.rejected_attention_mask.to(device),
-            )
+            # Forward pass with mixed precision
+            if scaler is not None:
+                from torch.cuda.amp import autocast
+                with autocast():
+                    # Forward pass - policy model
+                    policy_chosen_outputs = self.policy_model(**chosen_inputs)
+                    policy_rejected_outputs = self.policy_model(**rejected_inputs)
 
-            # Forward pass - reference model (if available)
-            if self.reference_model is not None:
-                with torch.no_grad():
-                    ref_chosen_outputs = self.reference_model(**chosen_inputs)
-                    ref_rejected_outputs = self.reference_model(**rejected_inputs)
-
-                    ref_chosen_log_probs = compute_log_probs(
-                        ref_chosen_outputs.logits,
+                    # Compute log probs for policy
+                    policy_chosen_log_probs = compute_log_probs(
+                        policy_chosen_outputs.logits,
                         dpo_batch.chosen_labels.to(device),
                         dpo_batch.chosen_attention_mask.to(device),
                     )
-                    ref_rejected_log_probs = compute_log_probs(
-                        ref_rejected_outputs.logits,
+                    policy_rejected_log_probs = compute_log_probs(
+                        policy_rejected_outputs.logits,
                         dpo_batch.rejected_labels.to(device),
                         dpo_batch.rejected_attention_mask.to(device),
                     )
+
+                    # Forward pass - reference model (if available)
+                    if self.reference_model is not None:
+                        with torch.no_grad():
+                            ref_chosen_outputs = self.reference_model(**chosen_inputs)
+                            ref_rejected_outputs = self.reference_model(**rejected_inputs)
+
+                            ref_chosen_log_probs = compute_log_probs(
+                                ref_chosen_outputs.logits,
+                                dpo_batch.chosen_labels.to(device),
+                                dpo_batch.chosen_attention_mask.to(device),
+                            )
+                            ref_rejected_log_probs = compute_log_probs(
+                                ref_rejected_outputs.logits,
+                                dpo_batch.rejected_labels.to(device),
+                                dpo_batch.rejected_attention_mask.to(device),
+                            )
+                    else:
+                        # Use policy model initial state as reference (approximation)
+                        with torch.no_grad():
+                            ref_chosen_log_probs = policy_chosen_log_probs.detach()
+                            ref_rejected_log_probs = policy_rejected_log_probs.detach()
+
+                    # Compute DPO loss
+                    loss, metrics = compute_dpo_loss(
+                        policy_chosen_log_probs=policy_chosen_log_probs,
+                        policy_rejected_log_probs=policy_rejected_log_probs,
+                        reference_chosen_log_probs=ref_chosen_log_probs,
+                        reference_rejected_log_probs=ref_rejected_log_probs,
+                        beta=beta,
+                        use_offset=use_offset,
+                        offset_margin=offset_margin,
+                    )
+
+                    # Normalize loss by accumulation steps
+                    loss = loss / gradient_accumulation_steps
+
+                # Backward pass with scaled gradients
+                scaler.scale(loss).backward()
             else:
-                # Use policy model initial state as reference (approximation)
-                with torch.no_grad():
-                    ref_chosen_log_probs = policy_chosen_log_probs.detach()
-                    ref_rejected_log_probs = policy_rejected_log_probs.detach()
+                # Forward pass - policy model (no mixed precision)
+                policy_chosen_outputs = self.policy_model(**chosen_inputs)
+                policy_rejected_outputs = self.policy_model(**rejected_inputs)
 
-            # Compute DPO loss
-            loss, metrics = compute_dpo_loss(
-                policy_chosen_log_probs=policy_chosen_log_probs,
-                policy_rejected_log_probs=policy_rejected_log_probs,
-                reference_chosen_log_probs=ref_chosen_log_probs,
-                reference_rejected_log_probs=ref_rejected_log_probs,
-                beta=beta,
-                use_offset=use_offset,
-                offset_margin=offset_margin,
-            )
+                # Compute log probs for policy
+                policy_chosen_log_probs = compute_log_probs(
+                    policy_chosen_outputs.logits,
+                    dpo_batch.chosen_labels.to(device),
+                    dpo_batch.chosen_attention_mask.to(device),
+                )
+                policy_rejected_log_probs = compute_log_probs(
+                    policy_rejected_outputs.logits,
+                    dpo_batch.rejected_labels.to(device),
+                    dpo_batch.rejected_attention_mask.to(device),
+                )
 
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
+                # Forward pass - reference model (if available)
+                if self.reference_model is not None:
+                    with torch.no_grad():
+                        ref_chosen_outputs = self.reference_model(**chosen_inputs)
+                        ref_rejected_outputs = self.reference_model(**rejected_inputs)
 
-            # Clip gradients
-            grad_norm = clip_gradients(self.policy_model, max_grad_norm)
+                        ref_chosen_log_probs = compute_log_probs(
+                            ref_chosen_outputs.logits,
+                            dpo_batch.chosen_labels.to(device),
+                            dpo_batch.chosen_attention_mask.to(device),
+                        )
+                        ref_rejected_log_probs = compute_log_probs(
+                            ref_rejected_outputs.logits,
+                            dpo_batch.rejected_labels.to(device),
+                            dpo_batch.rejected_attention_mask.to(device),
+                        )
+                else:
+                    # Use policy model initial state as reference (approximation)
+                    with torch.no_grad():
+                        ref_chosen_log_probs = policy_chosen_log_probs.detach()
+                        ref_rejected_log_probs = policy_rejected_log_probs.detach()
 
-            # Optimizer step
-            self.optimizer.step()
+                # Compute DPO loss
+                loss, metrics = compute_dpo_loss(
+                    policy_chosen_log_probs=policy_chosen_log_probs,
+                    policy_rejected_log_probs=policy_rejected_log_probs,
+                    reference_chosen_log_probs=ref_chosen_log_probs,
+                    reference_rejected_log_probs=ref_rejected_log_probs,
+                    beta=beta,
+                    use_offset=use_offset,
+                    offset_margin=offset_margin,
+                )
 
-            # Scheduler step
-            if self.scheduler is not None:
-                self.scheduler.step()
+                # Normalize loss by accumulation steps
+                loss = loss / gradient_accumulation_steps
 
-            # Store metrics
+                # Backward pass (standard)
+                loss.backward()
+
+            # Increment accumulation counter
+            accumulation_counter += 1
+
+            # Only update weights after accumulating gradients
+            if accumulation_counter % gradient_accumulation_steps == 0:
+                if scaler is not None:
+                    # Unscale gradients and clip
+                    scaler.unscale_(self.optimizer)
+                    grad_norm = clip_gradients(self.policy_model, max_grad_norm)
+
+                    # Optimizer step with scaler
+                    scaler.step(self.optimizer)
+                    scaler.update()
+                else:
+                    # Clip gradients
+                    grad_norm = clip_gradients(self.policy_model, max_grad_norm)
+
+                    # Optimizer step
+                    self.optimizer.step()
+
+                # Scheduler step (only when we actually update)
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+            # Store metrics (denormalize loss for logging)
             accuracies.append(metrics['accuracy'].item())
-            dpo_losses.append(loss.item())
+            dpo_losses.append(loss.item() * gradient_accumulation_steps)
             preference_margins.append(metrics['margin'].item())
             chosen_rewards.append(metrics['chosen_reward'].item())
             rejected_rewards.append(metrics['rejected_reward'].item())

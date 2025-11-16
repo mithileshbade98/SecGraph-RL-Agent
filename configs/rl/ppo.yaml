@@ -120,4 +120,6 @@ advanced:
   use_score_norm: false
   whiten_rewards: true
   enable_gradient_checkpointing: false
-  fp16: false  # Mixed precision (use on GPU)
+  use_mixed_precision: false  # Mixed precision training (FP16 on GPU, 2x faster, 50% less memory)
+  use_distributed: false  # Distributed training (multi-GPU/multi-node via DDP)
+  find_unused_parameters: false  # DDP: Find unused parameters (slower but more robust)
