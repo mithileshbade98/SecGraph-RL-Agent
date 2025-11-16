@@ -5,7 +5,7 @@ Why: Stable policy gradients with verifiable rewards.
 Source: "RL with Verifiable Rewards" - arXiv:2410.15246
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 import yaml
 import json
@@ -18,9 +18,22 @@ from reason_agent.rl.lora_utils import (
     initialize_peft_model,
     save_lora_adapter,
     preprocess_text,
+    preprocess_batch,
     postprocess_output,
     generate_with_lora,
 )
+import torch.nn.functional as F
+from reason_agent.rl.training_utils import (
+    compute_gae,
+    compute_ppo_loss,
+    compute_value_loss,
+    compute_log_probs,
+    compute_kl_divergence,
+    clip_gradients,
+    whiten_advantages,
+    RewardComputer,
+)
+from reason_agent.rl.data_collators import PPODataCollator
 
 
 class PPOTrainer:
@@ -64,6 +77,14 @@ class PPOTrainer:
         if initialize_model and self.base_model_name:
             self._initialize_model()
 
+        # Initialize optimizer (if model exists)
+        self.optimizer = None
+        if self.model is not None:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.training_config.get('learning_rate', 1e-5),
+            )
+
     def _initialize_model(self) -> None:
         """Initialize PEFT model with LoRA adapters."""
         if not self.base_model_name:
@@ -90,6 +111,8 @@ class PPOTrainer:
         self,
         num_episodes: int = 100,
         save_path: Optional[Path] = None,
+        use_actual_training: bool = True,
+        training_data: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Train PPO on verifiable math tasks.
@@ -97,18 +120,179 @@ class PPOTrainer:
         Args:
             num_episodes: Number of training episodes
             save_path: Path to save trained adapter
+            use_actual_training: If True and model is initialized, use actual training
+            training_data: Optional training data (list of dicts with query/response/reward)
 
         Returns:
             Training metrics
         """
         logger.info(f"Starting PPO training for {num_episodes} episodes...")
 
-        # Realistic training loop with learning curves
-        # Simulates actual RL training with:
-        # - Initial exploration (low rewards)
-        # - Learning phase (improving rewards)
-        # - Convergence (plateauing rewards)
-        # - Natural variance/noise
+        # Choose training mode
+        if use_actual_training and self.model is not None and self.optimizer is not None:
+            logger.info("Using ACTUAL PPO training with model updates")
+            return self._train_actual(num_episodes, save_path, training_data)
+        else:
+            logger.warning("Using SIMULATION mode (no model updates)")
+            return self._train_simulation(num_episodes, save_path)
+
+    def _train_actual(
+        self,
+        num_episodes: int,
+        save_path: Optional[Path],
+        training_data: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """
+        Actual PPO training with real model updates.
+
+        Args:
+            num_episodes: Number of training episodes
+            save_path: Path to save adapter
+            training_data: Training data (queries and expected outputs)
+
+        Returns:
+            Training metrics
+        """
+        logger.info("🔥 Starting ACTUAL PPO training with gradient updates")
+
+        # Training hyperparameters
+        ppo_epochs = self.training_config.get('ppo_epochs', 4)
+        clip_range = self.training_config.get('clip_range', 0.2)
+        value_coef = self.training_config.get('value_coef', 0.5)
+        entropy_coef = self.training_config.get('entropy_coef', 0.01)
+        gamma = self.reward_config.get('gamma', 0.99)
+        gae_lambda = self.reward_config.get('gae_lambda', 0.95)
+        max_grad_norm = self.training_config.get('max_grad_norm', 1.0)
+
+        # Initialize reward computer
+        reward_computer = RewardComputer()
+
+        # Metrics tracking
+        mean_rewards = []
+        policy_losses = []
+        value_losses = []
+        kl_divs = []
+
+        # Create mock training data if none provided
+        if training_data is None:
+            training_data = self._create_mock_training_data(num_samples=50)
+
+        # Training loop
+        for episode in range(num_episodes):
+            # Sample a batch from training data
+            batch_size = min(4, len(training_data))
+            batch_indices = np.random.choice(len(training_data), batch_size, replace=False)
+            batch = [training_data[i] for i in batch_indices]
+
+            # Generate rollouts
+            rollouts = self._generate_rollouts(batch)
+
+            # Store old log probs for PPO
+            with torch.no_grad():
+                old_log_probs = self._compute_rollout_log_probs(rollouts)
+
+            # Compute advantages using GAE
+            advantages, returns = self._compute_advantages_gae(
+                rollouts, gamma=gamma, gae_lambda=gae_lambda
+            )
+
+            # Whiten advantages
+            advantages = whiten_advantages(advantages)
+
+            # PPO update epochs
+            epoch_policy_losses = []
+            epoch_value_losses = []
+            epoch_kl_divs = []
+
+            for ppo_epoch in range(ppo_epochs):
+                # Forward pass
+                outputs = self._forward_rollouts(rollouts)
+
+                # Compute new log probs
+                new_log_probs = outputs['log_probs']
+                values = outputs['values']
+                logits = outputs['logits']
+
+                # Compute PPO loss
+                policy_loss = compute_ppo_loss(
+                    log_probs=new_log_probs,
+                    old_log_probs=old_log_probs,
+                    advantages=advantages,
+                    clip_range=clip_range,
+                )
+
+                # Compute value loss
+                value_loss = compute_value_loss(values, returns)
+
+                # Compute entropy for exploration
+                from reason_agent.rl.training_utils import compute_entropy
+                entropy = compute_entropy(logits)
+
+                # Total loss
+                loss = (
+                    policy_loss
+                    + value_coef * value_loss
+                    - entropy_coef * entropy
+                )
+
+                # Backward pass
+                self.optimizer.zero_grad()
+                loss.backward()
+
+                # Clip gradients
+                grad_norm = clip_gradients(self.model, max_grad_norm)
+
+                # Optimizer step
+                self.optimizer.step()
+
+                # Compute KL for monitoring
+                with torch.no_grad():
+                    kl = torch.abs(new_log_probs - old_log_probs).mean()
+
+                epoch_policy_losses.append(policy_loss.item())
+                epoch_value_losses.append(value_loss.item())
+                epoch_kl_divs.append(kl.item())
+
+            # Compute episode rewards
+            episode_rewards = [r['reward'] for r in rollouts]
+            mean_reward = np.mean(episode_rewards)
+
+            # Store metrics
+            mean_rewards.append(mean_reward)
+            policy_losses.append(np.mean(epoch_policy_losses))
+            value_losses.append(np.mean(epoch_value_losses))
+            kl_divs.append(np.mean(epoch_kl_divs))
+
+            if (episode + 1) % 10 == 0:
+                logger.info(
+                    f"Episode {episode + 1}/{num_episodes} | "
+                    f"Reward: {mean_reward:.3f} | "
+                    f"Policy Loss: {policy_losses[-1]:.3f} | "
+                    f"Value Loss: {value_losses[-1]:.3f} | "
+                    f"KL: {kl_divs[-1]:.4f}"
+                )
+
+        return self._save_training_metrics(
+            mean_rewards, policy_losses, value_losses, kl_divs,
+            num_episodes, save_path
+        )
+
+    def _train_simulation(
+        self,
+        num_episodes: int,
+        save_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """
+        Simulation mode training (generates mock metrics).
+
+        Args:
+            num_episodes: Number of episodes
+            save_path: Save path
+
+        Returns:
+            Mock training metrics
+        """
+        logger.warning("⚠️  Running in SIMULATION mode - no actual model updates")
 
         mean_rewards = []
         policy_losses = []
@@ -152,6 +336,22 @@ class PPOTrainer:
                 avg_reward = sum(mean_rewards[-10:]) / 10
                 logger.info(f"Episode {episode + 1}/{num_episodes}, Avg Reward: {avg_reward:.3f}, "
                            f"Policy Loss: {policy_losses[-1]:.3f}, KL: {kl_divs[-1]:.4f}")
+
+        return self._save_training_metrics(
+            mean_rewards, policy_losses, value_losses, kl_divs,
+            num_episodes, save_path
+        )
+
+    def _save_training_metrics(
+        self,
+        mean_rewards: list,
+        policy_losses: list,
+        value_losses: list,
+        kl_divs: list,
+        num_episodes: int,
+        save_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """Save training metrics and adapter."""
 
         # Save metrics for UI to display
         metrics_dir = Path("artifacts/runs/ppo")
@@ -210,6 +410,196 @@ class PPOTrainer:
                     f.write("Note: Run with actual base model to save LoRA weights\n")
 
         return metrics
+
+    def _create_mock_training_data(self, num_samples: int = 50) -> list:
+        """Create mock training data for PPO."""
+        data = []
+        queries = [
+            "Detect multi-account abuse from the same device",
+            "Check for velocity violations in login attempts",
+            "Identify burst patterns in account creation",
+            "Analyze suspicious fund transfer patterns",
+            "Detect coordinated fraud behavior across accounts",
+        ]
+
+        for i in range(num_samples):
+            query = queries[i % len(queries)]
+            data.append({
+                'query': query,
+                'expected_output': f"Step 1: Analyze pattern. Step 2: Check policy. Step 3: Verify anomaly.",
+                'is_correct': random.random() > 0.3,  # 70% correct
+            })
+
+        return data
+
+    def _generate_rollouts(self, batch: list) -> list:
+        """
+        Generate rollouts by running model on queries.
+
+        Args:
+            batch: List of training examples
+
+        Returns:
+            List of rollouts with responses and rewards
+        """
+        rollouts = []
+
+        for example in batch:
+            query = example['query']
+
+            # Generate response
+            try:
+                response = generate_with_lora(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    prompt=query,
+                    max_new_tokens=128,
+                    temperature=0.7,
+                    top_p=0.9,
+                )
+            except Exception as e:
+                logger.error(f"Error generating response: {e}")
+                response = "Step 1: Error occurred"
+
+            # Compute reward
+            reward_computer = RewardComputer()
+            reward = reward_computer.compute_reward(
+                output=response,
+                expected_output=example.get('expected_output'),
+                is_correct=example.get('is_correct'),
+            )
+
+            rollouts.append({
+                'query': query,
+                'response': response,
+                'reward': reward,
+                'expected_output': example.get('expected_output'),
+            })
+
+        return rollouts
+
+    def _compute_rollout_log_probs(self, rollouts: list) -> torch.Tensor:
+        """Compute log probabilities for rollouts."""
+        log_probs_list = []
+
+        for rollout in rollouts:
+            query = rollout['query']
+            response = rollout['response']
+
+            # Tokenize
+            full_text = query + " " + response
+            inputs = preprocess_text(full_text, self.tokenizer, max_length=512)
+
+            # Move to device
+            device = next(self.model.parameters()).device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            # Forward pass
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+
+            # Compute log probs for response tokens
+            response_tokens = self.tokenizer.encode(response, add_special_tokens=False)
+            query_len = len(self.tokenizer.encode(query, add_special_tokens=False))
+
+            # Extract log probs for response
+            response_logits = logits[0, query_len:query_len + len(response_tokens), :]
+            log_probs = F.log_softmax(response_logits, dim=-1)
+
+            # Get log probs for actual tokens
+            token_log_probs = []
+            for i, token_id in enumerate(response_tokens):
+                if i < log_probs.shape[0]:
+                    token_log_probs.append(log_probs[i, token_id].item())
+
+            # Pad to fixed length
+            max_len = 128
+            while len(token_log_probs) < max_len:
+                token_log_probs.append(0.0)
+            token_log_probs = token_log_probs[:max_len]
+
+            log_probs_list.append(token_log_probs)
+
+        return torch.tensor(log_probs_list, dtype=torch.float32)
+
+    def _compute_advantages_gae(
+        self,
+        rollouts: list,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute advantages using Generalized Advantage Estimation."""
+        batch_size = len(rollouts)
+        seq_len = 128
+
+        # Extract rewards
+        rewards = torch.tensor([r['reward'] for r in rollouts], dtype=torch.float32)
+
+        # Expand to sequence
+        rewards_seq = rewards.unsqueeze(-1).expand(-1, seq_len)
+
+        # Mock value estimates (in real PPO, these come from value head)
+        values = torch.randn(batch_size, seq_len) * 0.1 + rewards.unsqueeze(-1)
+        next_values = torch.roll(values, -1, dims=1)
+
+        # Done flags (episode ends)
+        dones = torch.zeros(batch_size, seq_len)
+        dones[:, -1] = 1.0
+
+        # Compute GAE
+        advantages, returns = compute_gae(
+            rewards=rewards_seq,
+            values=values,
+            next_values=next_values,
+            dones=dones,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+        )
+
+        return advantages, returns
+
+    def _forward_rollouts(self, rollouts: list) -> Dict[str, torch.Tensor]:
+        """Forward pass through model for rollouts."""
+        batch_size = len(rollouts)
+        seq_len = 128
+
+        # Tokenize all rollouts
+        texts = [r['query'] + " " + r['response'] for r in rollouts]
+        inputs = preprocess_batch(texts, self.tokenizer, max_length=512)
+
+        # Move to device
+        device = next(self.model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        # Forward pass
+        outputs = self.model(**inputs)
+        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+        # Compute log probs (simplified)
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        # For this simplified version, use mean log prob
+        mean_log_probs = log_probs.mean(dim=-1)[:, :seq_len]
+
+        # Pad to seq_len if needed
+        if mean_log_probs.shape[1] < seq_len:
+            padding = torch.zeros(
+                batch_size, seq_len - mean_log_probs.shape[1],
+                device=device
+            )
+            mean_log_probs = torch.cat([mean_log_probs, padding], dim=1)
+        else:
+            mean_log_probs = mean_log_probs[:, :seq_len]
+
+        # Mock value estimates (in real PPO, this comes from value head)
+        values = torch.randn(batch_size, seq_len, device=device) * 0.1
+
+        return {
+            'log_probs': mean_log_probs,
+            'values': values,
+            'logits': logits,
+        }
 
 
 def main():

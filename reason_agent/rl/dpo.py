@@ -10,6 +10,9 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 import json
 import yaml
+import random
+import numpy as np
+from datetime import datetime
 from loguru import logger
 import torch
 from reason_agent.rl.lora_utils import (
@@ -20,6 +23,13 @@ from reason_agent.rl.lora_utils import (
     postprocess_output,
     generate_with_lora,
 )
+from reason_agent.rl.training_utils import (
+    compute_dpo_loss,
+    compute_log_probs,
+    clip_gradients,
+)
+from reason_agent.rl.data_collators import DPODataCollator
+import torch.nn.functional as F
 
 
 class DPOTrainer:
@@ -65,6 +75,14 @@ class DPOTrainer:
         # Initialize models if requested and base model is specified
         if initialize_model and self.base_model_name:
             self._initialize_models()
+
+        # Initialize optimizer (if policy model exists)
+        self.optimizer = None
+        if self.policy_model is not None:
+            self.optimizer = torch.optim.AdamW(
+                self.policy_model.parameters(),
+                lr=self.training_config.get('learning_rate', 1e-6),
+            )
 
     def _initialize_models(self) -> None:
         """Initialize policy and reference models with LoRA adapters."""
@@ -142,6 +160,7 @@ class DPOTrainer:
         data_path: Optional[Path] = None,
         num_epochs: int = 1,
         save_path: Optional[Path] = None,
+        use_actual_training: bool = True,
     ) -> Dict[str, Any]:
         """
         Train DPO on preference pairs.
@@ -150,6 +169,7 @@ class DPOTrainer:
             data_path: Path to preference pairs JSONL
             num_epochs: Number of training epochs
             save_path: Path to save trained adapter
+            use_actual_training: If True and model initialized, use actual training
 
         Returns:
             Training metrics
@@ -165,6 +185,172 @@ class DPOTrainer:
         if not pairs:
             logger.warning("No preference pairs found, creating mock data")
             pairs = self._create_mock_pairs(10)
+
+        # Choose training mode
+        if use_actual_training and self.policy_model is not None and self.optimizer is not None:
+            logger.info("Using ACTUAL DPO training with model updates")
+            return self._train_actual(pairs, num_epochs, save_path)
+        else:
+            logger.warning("Using SIMULATION mode (no model updates)")
+            return self._train_simulation(pairs, num_epochs, save_path)
+
+    def _train_actual(
+        self,
+        pairs: List[Dict[str, Any]],
+        num_epochs: int,
+        save_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """
+        Actual DPO training with real model updates.
+
+        Args:
+            pairs: Preference pairs
+            num_epochs: Number of epochs
+            save_path: Save path
+
+        Returns:
+            Training metrics
+        """
+        logger.info("🔥 Starting ACTUAL DPO training with gradient updates")
+
+        # Training hyperparameters
+        beta = self.dpo_config.get('beta', 0.1)
+        use_offset = self.dpo_config.get('use_offset', False)
+        offset_margin = self.dpo_config.get('offset_margin', 0.0)
+        max_grad_norm = self.training_config.get('max_grad_norm', 1.0)
+        batch_size = min(4, len(pairs))
+
+        # Initialize data collator
+        collator = DPODataCollator(
+            tokenizer=self.tokenizer,
+            max_length=self.training_config.get('max_length', 512),
+        )
+
+        # Metrics tracking
+        accuracies = []
+        dpo_losses = []
+        preference_margins = []
+        chosen_rewards = []
+        rejected_rewards = []
+
+        # Training loop
+        for epoch in range(num_epochs):
+            # Sample batch
+            batch_indices = np.random.choice(len(pairs), min(batch_size, len(pairs)), replace=False)
+            batch = [pairs[i] for i in batch_indices]
+
+            # Collate batch
+            dpo_batch = collator(batch)
+
+            # Move to device
+            device = next(self.policy_model.parameters()).device
+            chosen_inputs = {
+                'input_ids': dpo_batch.chosen_input_ids.to(device),
+                'attention_mask': dpo_batch.chosen_attention_mask.to(device),
+            }
+            rejected_inputs = {
+                'input_ids': dpo_batch.rejected_input_ids.to(device),
+                'attention_mask': dpo_batch.rejected_attention_mask.to(device),
+            }
+
+            # Forward pass - policy model
+            policy_chosen_outputs = self.policy_model(**chosen_inputs)
+            policy_rejected_outputs = self.policy_model(**rejected_inputs)
+
+            # Compute log probs for policy
+            policy_chosen_log_probs = compute_log_probs(
+                policy_chosen_outputs.logits,
+                dpo_batch.chosen_labels.to(device),
+                dpo_batch.chosen_attention_mask.to(device),
+            )
+            policy_rejected_log_probs = compute_log_probs(
+                policy_rejected_outputs.logits,
+                dpo_batch.rejected_labels.to(device),
+                dpo_batch.rejected_attention_mask.to(device),
+            )
+
+            # Forward pass - reference model (if available)
+            if self.reference_model is not None:
+                with torch.no_grad():
+                    ref_chosen_outputs = self.reference_model(**chosen_inputs)
+                    ref_rejected_outputs = self.reference_model(**rejected_inputs)
+
+                    ref_chosen_log_probs = compute_log_probs(
+                        ref_chosen_outputs.logits,
+                        dpo_batch.chosen_labels.to(device),
+                        dpo_batch.chosen_attention_mask.to(device),
+                    )
+                    ref_rejected_log_probs = compute_log_probs(
+                        ref_rejected_outputs.logits,
+                        dpo_batch.rejected_labels.to(device),
+                        dpo_batch.rejected_attention_mask.to(device),
+                    )
+            else:
+                # Use policy model initial state as reference (approximation)
+                with torch.no_grad():
+                    ref_chosen_log_probs = policy_chosen_log_probs.detach()
+                    ref_rejected_log_probs = policy_rejected_log_probs.detach()
+
+            # Compute DPO loss
+            loss, metrics = compute_dpo_loss(
+                policy_chosen_log_probs=policy_chosen_log_probs,
+                policy_rejected_log_probs=policy_rejected_log_probs,
+                reference_chosen_log_probs=ref_chosen_log_probs,
+                reference_rejected_log_probs=ref_rejected_log_probs,
+                beta=beta,
+                use_offset=use_offset,
+                offset_margin=offset_margin,
+            )
+
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            # Clip gradients
+            grad_norm = clip_gradients(self.policy_model, max_grad_norm)
+
+            # Optimizer step
+            self.optimizer.step()
+
+            # Store metrics
+            accuracies.append(metrics['accuracy'].item())
+            dpo_losses.append(loss.item())
+            preference_margins.append(metrics['margin'].item())
+            chosen_rewards.append(metrics['chosen_reward'].item())
+            rejected_rewards.append(metrics['rejected_reward'].item())
+
+            if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
+                logger.info(
+                    f"Epoch {epoch + 1}/{num_epochs} | "
+                    f"Loss: {loss.item():.4f} | "
+                    f"Acc: {metrics['accuracy'].item():.3f} | "
+                    f"Margin: {metrics['margin'].item():.3f}"
+                )
+
+        return self._save_training_metrics(
+            accuracies, dpo_losses, preference_margins,
+            chosen_rewards, rejected_rewards, len(pairs),
+            num_epochs, save_path
+        )
+
+    def _train_simulation(
+        self,
+        pairs: List[Dict[str, Any]],
+        num_epochs: int,
+        save_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """
+        Simulation mode training (generates mock metrics).
+
+        Args:
+            pairs: Preference pairs
+            num_epochs: Number of epochs
+            save_path: Save path
+
+        Returns:
+            Mock training metrics
+        """
+        logger.warning("⚠️  Running in SIMULATION mode - no actual model updates")
 
         # Mock training loop with realistic learning curves
         # In production:
@@ -223,21 +409,42 @@ class DPOTrainer:
             chosen_rewards.append(chosen_rew)
             rejected_rewards.append(rejected_rew)
 
-            logger.info(
-                f"Epoch {epoch + 1}/{num_epochs} - "
-                f"Acc: {accuracies[-1]:.3f}, Loss: {dpo_losses[-1]:.3f}, "
-                f"Margin: {preference_margins[-1]:.3f}"
-            )
+            if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
+                logger.info(
+                    f"Epoch {epoch + 1}/{num_epochs} - "
+                    f"Acc: {accuracies[-1]:.3f}, Loss: {dpo_losses[-1]:.3f}, "
+                    f"Margin: {preference_margins[-1]:.3f}"
+                )
 
-        # Save training metrics to JSON for UI consumption
+        return self._save_training_metrics(
+            accuracies, dpo_losses, preference_margins,
+            chosen_rewards, rejected_rewards, len(pairs),
+            num_epochs, save_path
+        )
+
+    def _save_training_metrics(
+        self,
+        accuracies: list,
+        dpo_losses: list,
+        preference_margins: list,
+        chosen_rewards: list,
+        rejected_rewards: list,
+        num_pairs: int,
+        num_epochs: int,
+        save_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """Save DPO training metrics and adapter."""
+        from datetime import datetime
+
+        # Save training metrics to JSON
         metrics = {
             'algorithm': 'dpo',
             'timestamp': datetime.now().isoformat(),
             'num_epochs': num_epochs,
-            'num_pairs': len(pairs),
-            'final_accuracy': float(accuracies[-1]),
-            'final_loss': float(dpo_losses[-1]),
-            'final_margin': float(preference_margins[-1]),
+            'num_pairs': num_pairs,
+            'final_accuracy': float(accuracies[-1]) if accuracies else 0.0,
+            'final_loss': float(dpo_losses[-1]) if dpo_losses else 0.0,
+            'final_margin': float(preference_margins[-1]) if preference_margins else 0.0,
             'accuracies': [float(a) for a in accuracies],
             'dpo_losses': [float(l) for l in dpo_losses],
             'preference_margins': [float(m) for m in preference_margins],
@@ -281,7 +488,6 @@ class DPOTrainer:
                 placeholder_file = save_path / "training_completed.txt"
                 save_path.mkdir(parents=True, exist_ok=True)
                 with open(placeholder_file, 'w') as f:
-                    from datetime import datetime
                     f.write(f"DPO training completed at {datetime.now().isoformat()}\n")
                     f.write(f"Final accuracy: {metrics['final_accuracy']:.3f}\n")
                     f.write(f"Trained on {metrics['num_pairs']} preference pairs\n")
