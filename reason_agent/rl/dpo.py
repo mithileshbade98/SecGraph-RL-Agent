@@ -50,7 +50,7 @@ class DPOTrainer:
         self,
         config_path: Optional[Path] = None,
         base_model: Optional[str] = None,
-        initialize_model: bool = False,
+        initialize_model: bool = True,
         checkpoint_dir: Optional[Path] = None,
     ):
         """
@@ -59,7 +59,7 @@ class DPOTrainer:
         Args:
             config_path: Path to dpo.yaml config
             base_model: Base model name/path (if None, use from config)
-            initialize_model: Whether to initialize the PEFT models immediately
+            initialize_model: Whether to initialize the PEFT models immediately (default: True)
             checkpoint_dir: Directory for checkpoints (default: artifacts/checkpoints/dpo)
         """
         if config_path is None:
@@ -195,10 +195,11 @@ class DPOTrainer:
 
         except Exception as e:
             logger.error(f"Failed to initialize DPO models: {e}")
-            logger.warning("Training will proceed in simulation mode without actual models")
-            self.policy_model = None
-            self.reference_model = None
-            self.tokenizer = None
+            raise RuntimeError(
+                f"Model initialization failed: {e}\n"
+                "Make sure the model is downloaded and accessible. "
+                "Run: python3 scripts/download_model.py"
+            )
 
     def load_preference_pairs(self, data_path: Path) -> List[Dict[str, Any]]:
         """
@@ -225,7 +226,6 @@ class DPOTrainer:
         data_path: Optional[Path] = None,
         num_epochs: int = 1,
         save_path: Optional[Path] = None,
-        use_actual_training: bool = True,
         val_data: Optional[list] = None,
         resume_from_checkpoint: bool = True,
     ) -> Dict[str, Any]:
@@ -236,13 +236,18 @@ class DPOTrainer:
             data_path: Path to preference pairs JSONL
             num_epochs: Number of training epochs
             save_path: Path to save trained adapter
-            use_actual_training: If True and model initialized, use actual training
             val_data: Optional validation data for evaluation
             resume_from_checkpoint: Whether to resume from latest checkpoint if available
 
         Returns:
             Training metrics
         """
+        if self.policy_model is None or self.optimizer is None:
+            raise RuntimeError(
+                "Model not initialized! DPO trainer requires a model to train. "
+                "Make sure base_model is configured in dpo.yaml and the model downloads successfully."
+            )
+
         if data_path is None:
             data_path = Path(self.data_config.get('train_file', 'data/audits/pairs.jsonl'))
 
@@ -250,7 +255,7 @@ class DPOTrainer:
 
         # Try to resume from checkpoint
         start_epoch = 0
-        if resume_from_checkpoint and self.policy_model is not None:
+        if resume_from_checkpoint:
             checkpoint = self.checkpointer.resume_from_latest(
                 model=self.policy_model,
                 optimizer=self.optimizer,
@@ -267,13 +272,8 @@ class DPOTrainer:
             logger.warning("No preference pairs found, creating mock data")
             pairs = self._create_mock_pairs(10)
 
-        # Choose training mode
-        if use_actual_training and self.policy_model is not None and self.optimizer is not None:
-            logger.info("Using ACTUAL DPO training with model updates")
-            return self._train_actual(pairs, num_epochs, save_path, val_data, start_epoch)
-        else:
-            logger.warning("Using SIMULATION mode (no model updates)")
-            return self._train_simulation(pairs, num_epochs, save_path)
+        logger.info("🔥 Using ACTUAL DPO training with model updates")
+        return self._train_actual(pairs, num_epochs, save_path, val_data, start_epoch)
 
     def _train_actual(
         self,
@@ -558,95 +558,6 @@ class DPOTrainer:
             num_epochs, save_path
         )
 
-    def _train_simulation(
-        self,
-        pairs: List[Dict[str, Any]],
-        num_epochs: int,
-        save_path: Optional[Path],
-    ) -> Dict[str, Any]:
-        """
-        Simulation mode training (generates mock metrics).
-
-        Args:
-            pairs: Preference pairs
-            num_epochs: Number of epochs
-            save_path: Save path
-
-        Returns:
-            Mock training metrics
-        """
-        logger.warning("⚠️  Running in SIMULATION mode - no actual model updates")
-
-        # Mock training loop with realistic learning curves
-        # In production:
-        # 1. Initialize policy and reference models (with LoRA)
-        # 2. For each pair:
-        #    - Compute log probs for chosen and rejected
-        #    - Compute DPO loss with beta
-        #    - Update policy
-        # 3. Track preference accuracy
-
-        import random
-        import numpy as np
-        from datetime import datetime
-
-        # Track metrics for realistic learning curves
-        accuracies = []
-        dpo_losses = []
-        preference_margins = []
-        chosen_rewards = []
-        rejected_rewards = []
-
-        # Realistic three-phase DPO learning
-        # Phase 1: Initial alignment (epochs 0-30%)
-        # Phase 2: Preference learning (epochs 30-80%)
-        # Phase 3: Convergence (epochs 80-100%)
-
-        baseline_acc = 0.52  # Slightly better than random
-        for epoch in range(num_epochs):
-            progress = epoch / max(num_epochs - 1, 1)
-
-            # Accuracy improvement curve
-            if progress < 0.3:
-                # Initial alignment phase - slow improvement
-                acc = baseline_acc + 0.08 * (progress / 0.3) + random.uniform(-0.02, 0.02)
-            elif progress < 0.8:
-                # Preference learning phase - rapid improvement
-                improvement = (progress - 0.3) / 0.5
-                acc = 0.60 + 0.25 * improvement + random.uniform(-0.03, 0.03)
-            else:
-                # Convergence phase - plateauing
-                acc = 0.85 + random.uniform(-0.02, 0.02)
-
-            accuracies.append(max(0.5, min(1.0, acc)))
-
-            # DPO loss (decreasing)
-            loss = 0.75 * np.exp(-2.5 * progress) + 0.05 + random.uniform(-0.02, 0.02)
-            dpo_losses.append(max(0.0, loss))
-
-            # Preference margin (increasing - model becomes more confident)
-            margin = 0.1 + 0.6 * progress + random.uniform(-0.05, 0.05)
-            preference_margins.append(max(0.0, margin))
-
-            # Reward estimates
-            chosen_rew = 0.4 + 0.5 * progress + random.uniform(-0.05, 0.05)
-            rejected_rew = 0.3 - 0.15 * progress + random.uniform(-0.05, 0.05)
-            chosen_rewards.append(chosen_rew)
-            rejected_rewards.append(rejected_rew)
-
-            if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
-                logger.info(
-                    f"Epoch {epoch + 1}/{num_epochs} - "
-                    f"Acc: {accuracies[-1]:.3f}, Loss: {dpo_losses[-1]:.3f}, "
-                    f"Margin: {preference_margins[-1]:.3f}"
-                )
-
-        return self._save_training_metrics(
-            accuracies, dpo_losses, preference_margins,
-            chosen_rewards, rejected_rewards, len(pairs),
-            num_epochs, save_path
-        )
-
     def _save_training_metrics(
         self,
         accuracies: list,
@@ -690,33 +601,19 @@ class DPOTrainer:
         logger.success(f"DPO training metrics saved to {metrics_file}")
 
         # Save adapter
-        if save_path:
+        if save_path and self.policy_model is not None and self.tokenizer is not None:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # If we have an actual model, save the LoRA adapter
-            if self.policy_model is not None and self.tokenizer is not None:
-                try:
-                    save_lora_adapter(
-                        model=self.policy_model,
-                        save_path=save_path,
-                        tokenizer=self.tokenizer,
-                    )
-                    logger.success(f"DPO LoRA adapter saved to {save_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save LoRA adapter: {e}")
-            else:
-                logger.info(f"Adapter path prepared at {save_path}")
-                logger.warning("No model initialized - adapter not saved (running in simulation mode)")
-
-                # Create placeholder to indicate training completed
-                placeholder_file = save_path / "training_completed.txt"
-                save_path.mkdir(parents=True, exist_ok=True)
-                with open(placeholder_file, 'w') as f:
-                    f.write(f"DPO training completed at {datetime.now().isoformat()}\n")
-                    f.write(f"Final accuracy: {metrics['final_accuracy']:.3f}\n")
-                    f.write(f"Trained on {metrics['num_pairs']} preference pairs\n")
-                    f.write("Note: Run with actual base model to save LoRA weights\n")
+            try:
+                save_lora_adapter(
+                    model=self.policy_model,
+                    save_path=save_path,
+                    tokenizer=self.tokenizer,
+                )
+                logger.success(f"DPO LoRA adapter saved to {save_path}")
+            except Exception as e:
+                logger.error(f"Failed to save LoRA adapter: {e}")
 
         return metrics
 

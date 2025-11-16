@@ -4,7 +4,7 @@
 
 # Model configuration
 model:
-  base_model: null  # Will use planner LLM
+  base_model: TinyLlama/TinyLlama-1.1B-Chat-v1.0  # Small, fast model (1.1B params)
   adapter_path: artifacts/models/ppo_adapter
   peft_config:
     method: lora
