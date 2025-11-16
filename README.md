@@ -71,7 +71,13 @@ make ui         # Launch Streamlit interface
 
 ## Architecture
 
-The system implements a layered architecture separating retrieval, reasoning, verification, and optimization:
+### System Overview
+
+The system implements a complete end-to-end pipeline from raw data to production-deployed models, with distinct phases for data preparation, model training, optimization, and inference.
+
+### Inference Architecture
+
+This is the runtime architecture when the agent processes user queries:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -93,8 +99,10 @@ The system implements a layered architecture separating retrieval, reasoning, ve
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  REASONING LAYER (Planner)                                       │
+│  REASONING LAYER (Planner with LoRA)                             │
 │  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Base LLM (Llama-2-7B) + LoRA Adapter (4MB)             │   │
+│  │  ↓                                                       │   │
 │  │  Step 1: Thought → Tool → Parameters → Execute          │   │
 │  │  Step 2: Thought → Tool → Parameters → Execute          │   │
 │  │  ...                                                     │   │
@@ -119,20 +127,6 @@ The system implements a layered architecture separating retrieval, reasoning, ve
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  RL OPTIMIZATION                                                 │
-│  ┌──────────────────┐          ┌───────────────────┐            │
-│  │  PPO (Process)   │          │   DPO (Trace      │            │
-│  │  Rewards for     │          │   Preferences)    │            │
-│  │  Reasoning Steps │          │   Expert Audits   │            │
-│  └──────────────────┘          └───────────────────┘            │
-│         │                              │                         │
-│         └──────────────┬───────────────┘                         │
-│                        ▼                                         │
-│                 Updated Policy (LoRA)                            │
-└─────────────────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
 │  DATA LAYER                                                      │
 │  ┌─────────────────┐  ┌────────────────┐  ┌─────────────────┐  │
 │  │  Neo4j (local)  │  │  FAISS (local) │  │  Parquet (lake) │  │
@@ -143,6 +137,496 @@ The system implements a layered architecture separating retrieval, reasoning, ve
 │  Cosmos DB (graph) | Azure AI Search (vectors) | ADX (timeseries)│
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Complete Training Pipeline Architecture
+
+This diagram shows the full lifecycle from raw data to deployed model:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 1: DATA PREPARATION (pretraining_prep.py)                          │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  Raw Data Sources                                                         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                               │
+│  │ JSONL    │  │   CSV    │  │ Parquet  │                               │
+│  │ Files    │  │  Files   │  │  Files   │                               │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘                               │
+│       │             │              │                                      │
+│       └─────────────┴──────────────┘                                      │
+│                     │                                                     │
+│                     ▼                                                     │
+│       ┌─────────────────────────────┐                                    │
+│       │   DatasetLoader             │                                    │
+│       │   - Load from multiple      │                                    │
+│       │     formats                 │                                    │
+│       │   - Parse and validate      │                                    │
+│       └─────────────┬───────────────┘                                    │
+│                     │                                                     │
+│                     ▼                                                     │
+│       ┌─────────────────────────────┐                                    │
+│       │   DataValidator             │                                    │
+│       │   - Format validation       │                                    │
+│       │   - Type checking           │                                    │
+│       │   - Statistical analysis    │                                    │
+│       │   - Quality scoring         │                                    │
+│       └─────────────┬───────────────┘                                    │
+│                     │                                                     │
+│                     ▼                                                     │
+│       ┌─────────────────────────────┐                                    │
+│       │   DataPreprocessor          │                                    │
+│       │   - Tokenization            │                                    │
+│       │   - Length filtering        │                                    │
+│       │   - Deduplication           │                                    │
+│       │   - Category balancing      │                                    │
+│       │   - Format conversion       │                                    │
+│       └─────────────┬───────────────┘                                    │
+│                     │                                                     │
+│                     ▼                                                     │
+│       ┌─────────────────────────────┐                                    │
+│       │   DataSplitter              │                                    │
+│       │   - Train/Val/Test split    │                                    │
+│       │   - K-fold generation       │                                    │
+│       │   - Stratified sampling     │                                    │
+│       └─────────────┬───────────────┘                                    │
+│                     │                                                     │
+│                     ▼                                                     │
+│       ┌─────────────────────────────┐                                    │
+│       │  Prepared Datasets          │                                    │
+│       │  ├─ train.jsonl (80%)       │                                    │
+│       │  ├─ val.jsonl (10%)         │                                    │
+│       │  └─ test.jsonl (10%)        │                                    │
+│       └─────────────────────────────┘                                    │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 2: MODEL INITIALIZATION WITH LoRA (lora_utils.py)                  │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  Base Model Loading                                        │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  HuggingFace Model Hub                               │  │          │
+│  │  │  - meta-llama/Llama-2-7b-hf                          │  │          │
+│  │  │  - Download weights (13GB)                           │  │          │
+│  │  │  - Load in float16 or 8-bit                          │  │          │
+│  │  └──────────────────┬───────────────────────────────────┘  │          │
+│  │                     │                                       │          │
+│  │                     ▼                                       │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  PEFT Configuration                                  │  │          │
+│  │  │  ┌────────────────────────────────────────────────┐  │  │          │
+│  │  │  │  LoRA Parameters:                              │  │  │          │
+│  │  │  │  - r (rank): 8 or 16                           │  │  │          │
+│  │  │  │  - alpha: 16 or 32                             │  │  │          │
+│  │  │  │  - dropout: 0.05                               │  │  │          │
+│  │  │  │  - target_modules:                             │  │  │          │
+│  │  │  │    * q_proj, k_proj, v_proj, o_proj           │  │  │          │
+│  │  │  │    * gate_proj, up_proj, down_proj            │  │  │          │
+│  │  │  │  - bias: "none"                                │  │  │          │
+│  │  │  │  - task_type: "CAUSAL_LM"                      │  │  │          │
+│  │  │  └────────────────────────────────────────────────┘  │  │          │
+│  │  └──────────────────┬───────────────────────────────────┘  │          │
+│  │                     │                                       │          │
+│  │                     ▼                                       │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  LoRA Adapter Injection                              │  │          │
+│  │  │                                                       │  │          │
+│  │  │  Original Layer:                                     │  │          │
+│  │  │  W (4096 x 4096) ── frozen, no gradients            │  │          │
+│  │  │                                                       │  │          │
+│  │  │  LoRA Decomposition:                                 │  │          │
+│  │  │  ΔW = B × A                                          │  │          │
+│  │  │  where:                                              │  │          │
+│  │  │  - A (4096 x 8)  ← trainable                        │  │          │
+│  │  │  - B (8 x 4096)  ← trainable                        │  │          │
+│  │  │                                                       │  │          │
+│  │  │  Forward Pass:                                       │  │          │
+│  │  │  h = W×x + (α/r)×B×A×x                              │  │          │
+│  │  │       ↑         ↑                                    │  │          │
+│  │  │    frozen    trainable                               │  │          │
+│  │  │                                                       │  │          │
+│  │  │  Trainable Parameters:                               │  │          │
+│  │  │  - Base model: 7B params (frozen)                   │  │          │
+│  │  │  - LoRA adapters: ~4M params (0.06% of total)       │  │          │
+│  │  └──────────────────────────────────────────────────────┘  │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+│  For PPO: Add Value Head                                                 │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  ModelWithValueHead                                        │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  Base Model (LoRA) → hidden_states (4096-dim)       │  │          │
+│  │  │          ↓                                           │  │          │
+│  │  │  Value Head Network:                                │  │          │
+│  │  │    ├─ Linear(4096 → 1024)                          │  │          │
+│  │  │    ├─ ReLU + Dropout(0.1)                          │  │          │
+│  │  │    ├─ Linear(1024 → 256)                           │  │          │
+│  │  │    ├─ ReLU + Dropout(0.1)                          │  │          │
+│  │  │    └─ Linear(256 → 1)                              │  │          │
+│  │  │          ↓                                           │  │          │
+│  │  │  Value Estimates (batch_size, seq_len)             │  │          │
+│  │  └──────────────────────────────────────────────────────┘  │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3: TRAINING (ppo.py / dpo.py)                                      │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  PPO Training Loop:                                                       │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  Episode Loop (100 episodes)                               │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  1. Data Loading                                     │  │          │
+│  │  │     └─ PPODataCollator                               │  │          │
+│  │  │        - Batch queries                               │  │          │
+│  │  │        - Tokenize with padding                       │  │          │
+│  │  │        - Create attention masks                      │  │          │
+│  │  │                                                       │  │          │
+│  │  │  2. Rollout Generation                               │  │          │
+│  │  │     └─ Model.generate()                              │  │          │
+│  │  │        - Sample responses                            │  │          │
+│  │  │        - Compute log probabilities                   │  │          │
+│  │  │        - Store old_log_probs for PPO                 │  │          │
+│  │  │                                                       │  │          │
+│  │  │  3. Reward Computation                               │  │          │
+│  │  │     └─ Verifiers                                     │  │          │
+│  │  │        - Policy checks                               │  │          │
+│  │  │        - Math validation                             │  │          │
+│  │  │        - Unit test execution                         │  │          │
+│  │  │        → Scalar rewards                              │  │          │
+│  │  │                                                       │  │          │
+│  │  │  4. Value Estimation (Value Head)                    │  │          │
+│  │  │     └─ Forward pass through value network            │  │          │
+│  │  │        - V(s_t) for each state                       │  │          │
+│  │  │                                                       │  │          │
+│  │  │  5. Advantage Computation (GAE)                      │  │          │
+│  │  │     └─ Generalized Advantage Estimation              │  │          │
+│  │  │        A_t = δ_t + (γλ)δ_{t+1} + (γλ)²δ_{t+2} + ...│  │          │
+│  │  │        where δ_t = r_t + γV(s_{t+1}) - V(s_t)       │  │          │
+│  │  │        - Normalize advantages                        │  │          │
+│  │  │                                                       │  │          │
+│  │  │  6. PPO Update Epochs (4 epochs)                     │  │          │
+│  │  │     For each epoch:                                  │  │          │
+│  │  │       ┌────────────────────────────────────────┐     │  │          │
+│  │  │       │ Forward Pass                           │     │  │          │
+│  │  │       │ - Compute new log_probs                │     │  │          │
+│  │  │       │ - Compute new values                   │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ Loss Computation                       │     │  │          │
+│  │  │       │ - Policy Loss (PPO clipped):           │     │  │          │
+│  │  │       │   ratio = exp(new_log - old_log)       │     │  │          │
+│  │  │       │   clipped = clip(ratio, 1-ε, 1+ε)      │     │  │          │
+│  │  │       │   L_policy = -min(ratio×A, clipped×A)  │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ - Value Loss:                          │     │  │          │
+│  │  │       │   L_value = (V - returns)²             │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ - Entropy Bonus:                       │     │  │          │
+│  │  │       │   L_entropy = -log_probs × probs       │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ Total Loss:                            │     │  │          │
+│  │  │       │ L = L_policy + 0.5×L_value - 0.01×L_H  │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ Backward Pass                          │     │  │          │
+│  │  │       │ - loss.backward()                      │     │  │          │
+│  │  │       │ - Gradient clipping (max_norm=1.0)     │     │  │          │
+│  │  │       │ - Only LoRA params updated             │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ Optimizer Step                         │     │  │          │
+│  │  │       │ - AdamW on LoRA parameters             │     │  │          │
+│  │  │       │                                         │     │  │          │
+│  │  │       │ Scheduler Step                         │     │  │          │
+│  │  │       │ - Update learning rate                 │     │  │          │
+│  │  │       │ - Warmup → Cosine decay                │     │  │          │
+│  │  │       └────────────────────────────────────────┘     │  │          │
+│  │  │                                                       │  │          │
+│  │  │  7. Validation (every 10 episodes)                   │  │          │
+│  │  │     └─ ModelEvaluator                                │  │          │
+│  │  │        - Generate on val_data                        │  │          │
+│  │  │        - Compute accuracy, BLEU, ROUGE               │  │          │
+│  │  │        - Track best_val_accuracy                     │  │          │
+│  │  │                                                       │  │          │
+│  │  │  8. Checkpointing (every 10 episodes)                │  │          │
+│  │  │     └─ TrainingCheckpointer                          │  │          │
+│  │  │        - Save model state_dict                       │  │          │
+│  │  │        - Save optimizer state                        │  │          │
+│  │  │        - Save scheduler state                        │  │          │
+│  │  │        - Save metrics                                │  │          │
+│  │  │        - Keep last 3 + best                          │  │          │
+│  │  └──────────────────────────────────────────────────────┘  │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+│  DPO Training Loop:                                                       │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  Epoch Loop (3 epochs)                                      │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  1. Load Preference Pairs                            │  │          │
+│  │  │     - prompt, chosen, rejected                       │  │          │
+│  │  │                                                       │  │          │
+│  │  │  2. Forward Pass (Policy Model)                      │  │          │
+│  │  │     - π_θ(chosen | prompt)                           │  │          │
+│  │  │     - π_θ(rejected | prompt)                         │  │          │
+│  │  │                                                       │  │          │
+│  │  │  3. Forward Pass (Reference Model - frozen)          │  │          │
+│  │  │     - π_ref(chosen | prompt)                         │  │          │
+│  │  │     - π_ref(rejected | prompt)                       │  │          │
+│  │  │                                                       │  │          │
+│  │  │  4. DPO Loss Computation                             │  │          │
+│  │  │     L = -log σ(β × [log(π_θ(c)/π_ref(c))            │  │          │
+│  │  │                    - log(π_θ(r)/π_ref(r))])          │  │          │
+│  │  │     where:                                           │  │          │
+│  │  │     - β = 0.1 (KL penalty coefficient)               │  │          │
+│  │  │     - σ = sigmoid function                           │  │          │
+│  │  │                                                       │  │          │
+│  │  │  5. Backward + Optimizer Step                        │  │          │
+│  │  │     - Update only policy model LoRA params           │  │          │
+│  │  │     - Reference model stays frozen                   │  │          │
+│  │  └──────────────────────────────────────────────────────┘  │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 4: POST-TRAINING OPTIMIZATION (post_training.py)                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  1. Adapter Merging                                        │          │
+│  │     ┌────────────────────────────────────────────────────┐ │          │
+│  │     │  Load base model (7B params)                       │ │          │
+│  │     │  Load LoRA adapter (4M params)                     │ │          │
+│  │     │                                                     │ │          │
+│  │     │  For each adapted layer:                           │ │          │
+│  │     │    W_merged = W_base + (α/r) × B × A               │ │          │
+│  │     │                                                     │ │          │
+│  │     │  Result: Single merged model (7B params)           │ │          │
+│  │     │  - No PEFT dependency at inference                 │ │          │
+│  │     │  - Slightly slower than adapter                    │ │          │
+│  │     │  - Easier deployment                               │ │          │
+│  │     └────────────────────────────────────────────────────┘ │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                             │                                             │
+│                             ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  2. Quantization (Optional)                                │          │
+│  │     ┌────────────────────────────────────────────────────┐ │          │
+│  │     │  4-bit Quantization (QLoRA):                       │ │          │
+│  │     │  - Use NF4 (Normal Float 4-bit)                    │ │          │
+│  │     │  - Block size: 64                                  │ │          │
+│  │     │  - Compute in bfloat16                             │ │          │
+│  │     │  - Double quantization for constants               │ │          │
+│  │     │                                                     │ │          │
+│  │     │  Storage reduction:                                │ │          │
+│  │     │  - FP16: 14GB                                      │ │          │
+│  │     │  - 8-bit: 7GB                                      │ │          │
+│  │     │  - 4-bit: 3.5GB                                    │ │          │
+│  │     │                                                     │ │          │
+│  │     │  Accuracy retention: 98-99%                        │ │          │
+│  │     └────────────────────────────────────────────────────┘ │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                             │                                             │
+│                             ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  3. Inference Optimization                                 │          │
+│  │     ┌────────────────────────────────────────────────────┐ │          │
+│  │     │  FlashAttention 2:                                 │ │          │
+│  │     │  - O(N) memory complexity vs O(N²)                 │ │          │
+│  │     │  - 2-4x faster attention                           │ │          │
+│  │     │  - Requires CUDA with compute capability 8.0+      │ │          │
+│  │     │                                                     │ │          │
+│  │     │  BetterTransformer:                                │ │          │
+│  │     │  - Fused operations                                │ │          │
+│  │     │  - Optimized kernels                               │ │          │
+│  │     │  - 1.3-1.8x speedup                                │ │          │
+│  │     └────────────────────────────────────────────────────┘ │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                             │                                             │
+│                             ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  4. ONNX Export (Optional)                                 │          │
+│  │     - Convert to ONNX format                               │          │
+│  │     - Optimize for ONNX Runtime                            │          │
+│  │     - Enable deployment in C++/Java/etc                    │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                             │                                             │
+│                             ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  5. Deployment Package                                     │          │
+│  │     ├─ model/ (quantized weights)                          │          │
+│  │     ├─ tokenizer/ (vocab + config)                         │          │
+│  │     ├─ deployment_config.json                              │          │
+│  │     ├─ example_usage.py                                    │          │
+│  │     └─ README.md                                            │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 5: PRODUCTION DEPLOYMENT                                           │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  Kubernetes Deployment                                                    │
+│  ┌────────────────────────────────────────────────────────────┐          │
+│  │  Pod (Replicas: 2-10 based on HPA)                         │          │
+│  │  ┌──────────────────────────────────────────────────────┐  │          │
+│  │  │  Container:                                          │  │          │
+│  │  │  - Base image: python:3.10-slim                      │  │          │
+│  │  │  - Model loaded from PVC                             │  │          │
+│  │  │  - FastAPI server on port 8000                       │  │          │
+│  │  │                                                       │  │          │
+│  │  │  Resources:                                          │  │          │
+│  │  │  - Request: 2 CPU, 8Gi memory                        │  │          │
+│  │  │  - Limit: 4 CPU, 16Gi memory                         │  │          │
+│  │  │                                                       │  │          │
+│  │  │  Probes:                                             │  │          │
+│  │  │  - Liveness: /health (every 10s)                     │  │          │
+│  │  │  - Readiness: /ready (every 5s)                      │  │          │
+│  │  └──────────────────────────────────────────────────────┘  │          │
+│  └────────────────────────────────────────────────────────────┘          │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### LoRA Implementation Deep Dive
+
+The LoRA (Low-Rank Adaptation) implementation is central to the system's efficiency. Here's how it works at the implementation level:
+
+**Parameter-Efficient Fine-Tuning:**
+Instead of updating all 7 billion parameters of the base model, LoRA injects small trainable matrices into each layer. For a weight matrix W of dimension d × d:
+
+1. Original transformation: h = Wx
+2. LoRA transformation: h = Wx + (α/r) × BAx
+   - W: frozen pretrained weights (d × d)
+   - B: trainable matrix (d × r)
+   - A: trainable matrix (r × d)
+   - r: rank (typically 8 or 16)
+   - α: scaling factor (typically 16 or 32)
+
+**Memory and Compute Benefits:**
+- Trainable parameters: r × d × 2 instead of d × d
+- For d=4096, r=8: 65K params vs 16M params (250x reduction per layer)
+- Total LoRA params across all layers: ~4M vs 7B (0.06% of model)
+- Training memory: 20GB vs 140GB (7x reduction)
+- Training speed: 10x faster per epoch
+
+**Adapter Storage and Loading:**
+The LoRA adapter is stored separately from the base model:
+- Base model: ~14GB (stored once, shared across adaptations)
+- LoRA adapter: ~4MB (task-specific, fast to swap)
+- At inference: Load base model + adapter in <1 second
+
+**Multi-Adapter Support:**
+The system can maintain multiple adapters for different tasks:
+- Adapter A: Fraud detection
+- Adapter B: Account abuse
+- Adapter C: Bot detection
+All sharing the same 7B parameter base model.
+
+### Training Flow Details
+
+**PPO Training Iteration:**
+
+1. Rollout Generation (Forward Pass):
+   - Input: query batch (4 examples)
+   - Tokenize and encode
+   - Generate responses autoregressively
+   - Store log probabilities for each token
+   - Time: ~2 seconds on GPU
+
+2. Reward Computation:
+   - Execute verifiers on generated responses
+   - Policy check: binary (0 or 1)
+   - Math validation: continuous (0 to 1)
+   - Unit tests: binary with partial credit
+   - Aggregate to scalar reward per sequence
+   - Time: ~500ms
+
+3. Value Estimation:
+   - Forward pass through value head
+   - Produces V(s) for each state
+   - Used in advantage computation
+   - Time: ~200ms
+
+4. GAE Computation:
+   - Compute temporal difference errors
+   - Apply exponential weighting
+   - Normalize advantages
+   - Time: ~50ms (CPU)
+
+5. PPO Update (4 epochs):
+   - Forward pass: recompute log probs
+   - Compute policy loss with clipping
+   - Compute value loss
+   - Backward pass: gradients only for LoRA + value head
+   - Optimizer step: AdamW with learning rate scheduling
+   - Time: ~8 seconds total
+
+6. Checkpoint and Validation:
+   - Save every 10 episodes
+   - Validate every 10 episodes
+   - Track best model by validation accuracy
+
+**DPO Training Iteration:**
+
+1. Preference Pair Loading:
+   - Load (prompt, chosen, rejected) tuples
+   - Tokenize both completions
+   - Create batched inputs
+
+2. Dual Forward Pass:
+   - Policy model: compute log probs for both chosen and rejected
+   - Reference model (frozen): compute baseline log probs
+   - Time: ~4 seconds
+
+3. DPO Loss:
+   - Compute log-ratio for chosen vs rejected
+   - Apply sigmoid with KL penalty (β=0.1)
+   - Encourages policy to prefer chosen over rejected
+   - Time: ~100ms
+
+4. Backward and Update:
+   - Gradients only for policy model LoRA params
+   - Reference model never updated
+   - Time: ~2 seconds
+
+### Checkpoint and Resume Flow
+
+**Checkpoint Structure:**
+```
+checkpoint_dir/
+├── checkpoint_epoch_10.pt
+│   ├── model_state_dict (LoRA + value head params)
+│   ├── optimizer_state_dict (AdamW state)
+│   ├── scheduler_state_dict (learning rate schedule)
+│   ├── epoch: 10
+│   └── metrics: {accuracy: 0.85, loss: 0.15}
+├── checkpoint_epoch_20.pt
+├── checkpoint_epoch_30.pt
+└── best_checkpoint.pt (validation accuracy: 0.92)
+```
+
+**Resume Process:**
+1. Find latest checkpoint
+2. Load model state (LoRA parameters)
+3. Load optimizer state (momentum buffers)
+4. Load scheduler state (step count)
+5. Extract epoch number
+6. Continue from epoch+1
+
+**Automatic Cleanup:**
+- Keep last N checkpoints (default: 3)
+- Always keep best checkpoint
+- Delete older checkpoints automatically
+
+This architecture ensures production-grade training with minimal resource usage, fast iteration cycles, and robust failure recovery
 
 ---
 
